@@ -1,0 +1,217 @@
+<?php
+require_once 'config.php';
+requireLogin();
+$admin = currentAdmin();
+
+// ── Stats ─────────────────────────────────────────────────
+try {
+    $pdo = db();
+    $where = '';
+    $params = [];
+    if ($admin['role'] === 'barangay_admin' && $admin['barangay']) {
+        $where = 'WHERE barangay = ?';
+        $params[] = $admin['barangay'];
+    }
+
+    $total      = $pdo->prepare("SELECT COUNT(*) FROM youth_users $where");
+    $total->execute($params);
+    $totalCount = $total->fetchColumn();
+
+    $month = $pdo->prepare("SELECT COUNT(*) FROM youth_users WHERE MONTH(created_at)=MONTH(NOW()) AND YEAR(created_at)=YEAR(NOW()) " . ($where ? "AND barangay=?" : ""));
+    $month->execute($params);
+    $monthCount = $month->fetchColumn();
+
+    $brgyQ = $pdo->prepare("SELECT COUNT(DISTINCT barangay) FROM youth_users $where");
+    $brgyQ->execute($params);
+    $brgyCount = $brgyQ->fetchColumn();
+
+    $genderQ = $pdo->prepare("SELECT gender, COUNT(*) as cnt FROM youth_users $where GROUP BY gender");
+    $genderQ->execute($params);
+    $genders = $genderQ->fetchAll();
+
+    $brgyTop = $pdo->prepare("SELECT barangay, COUNT(*) as cnt FROM youth_users $where GROUP BY barangay ORDER BY cnt DESC LIMIT 8");
+    $brgyTop->execute($params);
+    $topBarangays = $brgyTop->fetchAll();
+    $maxBrgy = max(array_column($topBarangays, 'cnt') ?: [1]);
+
+    $recentQ = $pdo->prepare("SELECT id,first_name,last_name,email,barangay,created_at FROM youth_users $where ORDER BY created_at DESC LIMIT 6");
+    $recentQ->execute($params);
+    $recent = $recentQ->fetchAll();
+
+} catch (Exception $e) {
+    $totalCount = $monthCount = $brgyCount = 0;
+    $genders = $topBarangays = $recent = [];
+    $maxBrgy = 1;
+}
+?>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Dashboard – LYDO Admin</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet"/>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css"/>
+<link rel="stylesheet" href="admin.css"/>
+</head>
+<body>
+<?php include 'sidebar.php'; ?>
+<div class="main-wrap">
+<?php include 'topbar.php'; ?>
+<main class="content">
+
+  <?php if ($msg = flash('success')): ?>
+    <div class="flash success"><i class="fas fa-check-circle"></i><?= htmlspecialchars($msg) ?></div>
+  <?php endif; ?>
+  <?php if ($msg = flash('error')): ?>
+    <div class="flash error"><i class="fas fa-exclamation-circle"></i><?= htmlspecialchars($msg) ?></div>
+  <?php endif; ?>
+
+  <div class="page-header">
+    <div>
+      <h2>Dashboard</h2>
+      <p>Welcome back, <strong><?= htmlspecialchars($admin['full_name']) ?></strong>! Here's the overview.</p>
+    </div>
+    <span class="date-badge"><i class="fas fa-calendar"></i> <?= date('F j, Y') ?></span>
+  </div>
+
+  <!-- STAT CARDS -->
+  <div class="stats-grid">
+    <div class="stat-card blue">
+      <div class="stat-icon"><i class="fas fa-users"></i></div>
+      <div><span class="stat-val"><?= number_format($totalCount) ?></span><span class="stat-lbl">Total Registered Youth</span></div>
+    </div>
+    <div class="stat-card green">
+      <div class="stat-icon"><i class="fas fa-user-plus"></i></div>
+      <div><span class="stat-val"><?= number_format($monthCount) ?></span><span class="stat-lbl">New This Month</span></div>
+    </div>
+    <div class="stat-card teal">
+      <div class="stat-icon"><i class="fas fa-map-marker-alt"></i></div>
+      <div><span class="stat-val"><?= $brgyCount ?></span><span class="stat-lbl">Barangays Covered</span></div>
+    </div>
+    <div class="stat-card orange">
+      <div class="stat-icon"><i class="fas fa-graduation-cap"></i></div>
+      <div><span class="stat-val">30+</span><span class="stat-lbl">Active Programs</span></div>
+    </div>
+    <?php
+    $pendingYouth   = (int)$pdo->query("SELECT COUNT(*) FROM youth_users WHERE status='pending'")->fetchColumn();
+    $totalMerit     = (int)$pdo->query("SELECT COALESCE(SUM(points),0) FROM org_merit_logs WHERE type='merit'")->fetchColumn();
+    $totalDemerit   = (int)$pdo->query("SELECT COALESCE(SUM(ABS(points)),0) FROM org_merit_logs WHERE type='demerit'")->fetchColumn();
+    $pendingLetters = (int)$pdo->query("SELECT COUNT(*) FROM org_explanation_letters WHERE status='pending'")->fetchColumn();
+    $activeOrgs     = (int)$pdo->query("SELECT COUNT(*) FROM organizations WHERE is_active=1")->fetchColumn();
+    $inactiveOrgs   = (int)$pdo->query("SELECT COUNT(*) FROM organizations WHERE is_active=0")->fetchColumn();
+    ?>
+    <?php if ($pendingYouth > 0): ?>
+    <a href="approvals.php" style="text-decoration:none">
+    <div class="stat-card" style="border:2px solid #f57f17;cursor:pointer">
+      <div class="stat-icon" style="background:#fff8e1;color:#f57f17"><i class="fas fa-clock"></i></div>
+      <div><span class="stat-val" style="color:#f57f17"><?= $pendingYouth ?></span><span class="stat-lbl">Pending Approvals</span></div>
+    </div>
+    </a>
+    <?php endif; ?>
+  </div>
+
+  <!-- MERIT & ORG STATS -->
+  <div class="stats-grid" style="margin-bottom:20px">
+    <a href="organizations.php" style="text-decoration:none">
+      <div class="stat-card green" style="cursor:pointer">
+        <div class="stat-icon"><i class="fas fa-sitemap"></i></div>
+        <div><span class="stat-val"><?= $activeOrgs ?></span><span class="stat-lbl">Active Organizations</span></div>
+      </div>
+    </a>
+    <div class="stat-card" style="border:1px solid #e2e8f0">
+      <div class="stat-icon" style="background:#f1f5f9;color:#475569"><i class="fas fa-pause-circle"></i></div>
+      <div><span class="stat-val"><?= $inactiveOrgs ?></span><span class="stat-lbl">Inactive Organizations</span></div>
+    </div>
+    <a href="merit.php" style="text-decoration:none">
+      <div class="stat-card" style="border:1px solid #e2e8f0;cursor:pointer">
+        <div class="stat-icon" style="background:#e8f5e9;color:#2e7d32"><i class="fas fa-star"></i></div>
+        <div><span class="stat-val" style="color:#2e7d32"><?= number_format($totalMerit) ?></span><span class="stat-lbl">Total Merit Points</span></div>
+      </div>
+    </a>
+    <a href="merit.php" style="text-decoration:none">
+      <div class="stat-card" style="border:1px solid #e2e8f0;cursor:pointer">
+        <div class="stat-icon" style="background:#ffebee;color:#c62828"><i class="fas fa-minus-circle"></i></div>
+        <div><span class="stat-val" style="color:#c62828"><?= number_format($totalDemerit) ?></span><span class="stat-lbl">Total Demerit Points</span></div>
+      </div>
+    </a>
+    <?php if ($pendingLetters > 0): ?>
+    <a href="merit.php?tab=letters" style="text-decoration:none">
+      <div class="stat-card" style="border:2px solid #e65100;cursor:pointer">
+        <div class="stat-icon" style="background:#fff3e0;color:#e65100"><i class="fas fa-envelope-open-text"></i></div>
+        <div><span class="stat-val" style="color:#e65100"><?= $pendingLetters ?></span><span class="stat-lbl">Pending Explanation Letters</span></div>
+      </div>
+    </a>
+    <?php endif; ?>
+  </div>
+
+  <div class="dash-grid">
+    <!-- RECENT REGISTRATIONS -->
+    <div class="card">
+      <div class="card-header">
+        <h3><i class="fas fa-clock"></i> Recent Registrations</h3>
+        <a href="users.php" class="card-link">View All →</a>
+      </div>
+      <table class="tbl">
+        <thead><tr><th>#</th><th>Name</th><th>Email</th><th>Barangay</th><th>Date</th></tr></thead>
+        <tbody>
+        <?php if (empty($recent)): ?>
+          <tr><td colspan="5" class="empty">No registrations yet.</td></tr>
+        <?php else: foreach ($recent as $i => $u): ?>
+          <tr>
+            <td><?= $i+1 ?></td>
+            <td><strong><?= htmlspecialchars($u['first_name'].' '.$u['last_name']) ?></strong></td>
+            <td><?= htmlspecialchars($u['email']) ?></td>
+            <td><?= htmlspecialchars($u['barangay'] ?: '—') ?></td>
+            <td><?= date('M j, Y', strtotime($u['created_at'])) ?></td>
+          </tr>
+        <?php endforeach; endif; ?>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- GENDER BREAKDOWN -->
+    <div class="card">
+      <div class="card-header"><h3><i class="fas fa-chart-pie"></i> By Gender</h3></div>
+      <div class="gender-list">
+        <?php
+        $gColors = ['Male'=>'#1565c0','Female'=>'#e91e63','Non-binary'=>'#9c27b0','Prefer not to say'=>'#78909c'];
+        $gTotal  = array_sum(array_column($genders,'cnt')) ?: 1;
+        foreach ($genders as $g):
+          $pct = round($g['cnt']/$gTotal*100);
+          $col = $gColors[$g['gender']] ?? '#90a4ae';
+        ?>
+        <div class="gender-item">
+          <div class="g-dot" style="background:<?= $col ?>"></div>
+          <span class="g-label"><?= htmlspecialchars($g['gender'] ?: 'Unknown') ?></span>
+          <div class="g-bar-track"><div class="g-bar-fill" style="width:<?= $pct ?>%;background:<?= $col ?>"></div></div>
+          <span class="g-count"><?= $g['cnt'] ?></span>
+          <span class="g-pct"><?= $pct ?>%</span>
+        </div>
+        <?php endforeach; ?>
+        <?php if (empty($genders)): ?><p class="empty">No data yet.</p><?php endif; ?>
+      </div>
+    </div>
+  </div>
+
+  <!-- TOP BARANGAYS -->
+  <div class="card mt-16">
+    <div class="card-header"><h3><i class="fas fa-map"></i> Top Barangays by Registration</h3></div>
+    <div class="brgy-list">
+      <?php foreach ($topBarangays as $b):
+        $pct = round($b['cnt']/$maxBrgy*100);
+      ?>
+      <div class="brgy-item">
+        <span class="brgy-name"><?= htmlspecialchars($b['barangay']) ?></span>
+        <div class="brgy-track"><div class="brgy-fill" style="width:<?= $pct ?>%"></div></div>
+        <span class="brgy-count"><?= $b['cnt'] ?></span>
+      </div>
+      <?php endforeach; ?>
+      <?php if (empty($topBarangays)): ?><p class="empty" style="padding:16px">No data yet.</p><?php endif; ?>
+    </div>
+  </div>
+
+</main>
+</div>
+</body>
+</html>
