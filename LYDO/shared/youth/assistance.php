@@ -1,0 +1,627 @@
+<?php
+require_once __DIR__ . '/../config.php';
+require_once __DIR__ . '/../assistance_checker.php';
+if (empty($_SESSION['user_id'])) { header('Location: ../../login.php'); exit; }
+
+$pdo    = db();
+$userId = (int)$_SESSION['user_id'];
+
+// Load user for sidebar
+$uStmt = $pdo->prepare('SELECT * FROM youth_users WHERE id=? LIMIT 1');
+$uStmt->execute([$userId]);
+$user = $uStmt->fetch();
+
+// Notification count for sidebar/topbar
+$nc = $pdo->prepare('SELECT COUNT(*) FROM notifications WHERE user_id=? AND is_read=FALSE');
+$nc->execute([$userId]);
+$notifCount = (int)$nc->fetchColumn();
+
+$uploadDir = __DIR__ . '/../uploads/assistance/';
+$tempDir   = __DIR__ . '/../uploads/assistance_temp/';
+if (!is_dir($uploadDir)) mkdir($uploadDir, 0755, true);
+if (!is_dir($tempDir))   mkdir($tempDir,   0755, true);
+
+$statusLabels  = ['submitted'=>'Submitted','under_evaluation'=>'Under Evaluation','for_coordination'=>'For Coordination','approved'=>'Approved','completed'=>'Completed','declined'=>'Declined',''=>'Unknown Status'];
+$statusColors  = ['submitted'=>['#1565c0','#e3f2fd'],'under_evaluation'=>['#f57f17','#fff8e1'],'for_coordination'=>['#7b1fa2','#f3e5f5'],'approved'=>['#2e7d32','#e8f5e9'],'completed'=>['#00796b','#e0f2f1'],'declined'=>['#c62828','#ffebee'],''=>['#475569','#f1f5f9']];
+$docTypeLabels = ['request_letter'=>'Request Letter','project_proposal'=>'Project Proposal','participant_list'=>'Participant List','sk_endorsement'=>'SK Endorsement','other'=>'Other Document',''=>'Unknown Document'];
+$activityTypes = ['Leadership Training','Community Service','Sports & Recreation','Arts & Culture','Environmental Campaign','Health & Wellness','Educational Program','Livelihood Training','Youth Summit / Forum','Other'];
+$allowed       = ['pdf','doc','docx','jpg','jpeg','png'];
+
+$checkResult = null;
+$formData    = [];
+$error = ''; $success = '';
+
+// -- Helper: save uploaded files to temp, return fake $_FILES-like array --
+function saveTempFiles(array $files, string $tempDir, int $userId): array {
+    $saved = [];
+    foreach ($files as $type => $file) {
+        if (!isset($file['error']) || $file['error'] !== UPLOAD_ERR_OK) continue;
+        $ext   = strtolower(pathinfo($file['name'], PATHINFO_EXTENSION));
+        $fname = 'tmp_' . $userId . '_' . $type . '_' . time() . '.' . $ext;
+        if (move_uploaded_file($file['tmp_name'], $tempDir . $fname)) {
+            $saved[$type] = [
+                'tmp_path'     => $tempDir . $fname,
+                'name'         => $file['name'],
+                'size'         => $file['size'],
+                'error'        => UPLOAD_ERR_OK,
+            ];
+        }
+    }
+    return $saved;
+}
+
+// -- Build a fake $_FILES from session-stored temp files --
+function buildFilesFromSession(array $sessionFiles): array {
+    $fakeFiles = [];
+    foreach ($sessionFiles as $type => $info) {
+        if (file_exists($info['tmp_path'])) {
+            $fakeFiles[$type] = [
+                'tmp_name' => $info['tmp_path'],
+                'name'     => $info['name'],
+                'size'     => $info['size'],
+                'error'    => UPLOAD_ERR_OK,
+            ];
+        }
+    }
+    return $fakeFiles;
+}
+
+// -- Handle POST -------------------------------------------
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    $action   = $_POST['action'] ?? '';
+    $formData = $_POST;
+
+    if ($action === 'submit') {
+
+        // -- CHECK ONLY: save files to temp, run checker, stay on form --
+        if (isset($_POST['check_only'])) {
+            // Save any newly uploaded files to temp
+            $newTempFiles = saveTempFiles($_FILES, $tempDir, $userId);
+
+            // Merge with previously saved temp files from session
+            $sessionFiles = $_SESSION['temp_files_' . $userId] ?? [];
+            foreach ($newTempFiles as $type => $info) {
+                // Delete old temp file for this type if replacing
+                if (isset($sessionFiles[$type]) && file_exists($sessionFiles[$type]['tmp_path'])) {
+                    @unlink($sessionFiles[$type]['tmp_path']);
+                }
+                $sessionFiles[$type] = $info;
+            }
+            $_SESSION['temp_files_' . $userId] = $sessionFiles;
+
+            // Build fake files array for checker (temp + new)
+            $filesForCheck = buildFilesFromSession($sessionFiles);
+            $checkResult   = runSmartCheck($_POST, $filesForCheck, $pdo, $userId);
+
+        } else {
+            // -- FINAL SUBMIT ------------------------------
+            $orgId   = (int)$_POST['organization_id'];
+            $repName = trim($_POST['representative_name'] ?? '');
+            $contact = trim($_POST['contact_number'] ?? '');
+            $email   = trim($_POST['contact_email'] ?? '');
+            $title   = trim($_POST['title'] ?? '');
+            $actType = trim($_POST['activity_type'] ?? '');
+            $desc    = trim($_POST['description'] ?? '');
+            $obj     = trim($_POST['objectives'] ?? '');
+            $outcome = trim($_POST['expected_outcome'] ?? '');
+            $parts   = (int)($_POST['participants'] ?? 0);
+            $tDate   = $_POST['target_date'] ?? null;
+            $venue   = trim($_POST['target_venue'] ?? '');
+            $budget  = (float)($_POST['budget_requested'] ?? 0);
+
+            if (!$orgId || !$title || !$desc || !$repName || !$contact) {
+                $error = 'Please fill in all required fields.';
+            } else {
+                // Use session temp files + any new files uploaded on final submit
+                $sessionFiles  = $_SESSION['temp_files_' . $userId] ?? [];
+                $newFiles      = saveTempFiles($_FILES, $tempDir, $userId);
+                foreach ($newFiles as $type => $info) {
+                    if (isset($sessionFiles[$type]) && file_exists($sessionFiles[$type]['tmp_path'])) {
+                        @unlink($sessionFiles[$type]['tmp_path']);
+                    }
+                    $sessionFiles[$type] = $info;
+                }
+                $filesForCheck = buildFilesFromSession($sessionFiles);
+
+                // Run final check
+                $checkResult = runSmartCheck($_POST, $filesForCheck, $pdo, $userId);
+
+                if (!empty($checkResult['doc_issues'])) {
+                    $error = 'Please fix the document issues before submitting.';
+                    $_SESSION['temp_files_' . $userId] = $sessionFiles;
+                } elseif ($checkResult['proposal']['score'] < 40) {
+                    $error = 'Your proposal needs more detail. See the review panel below.';
+                    $_SESSION['temp_files_' . $userId] = $sessionFiles;
+                } else {
+                    // Save request (using only existing columns)
+                    $pdo->prepare('INSERT INTO assistance_requests
+                        (organization_id,submitted_by,request_type,title,description,status)
+                        VALUES (?,?,?,?,?,?)')
+                        ->execute([$orgId,$userId,$actType,$title,$desc,'submitted']);
+                    $reqId = (int)$pdo->lastInsertId();
+
+                    // Move temp files to permanent location
+                    foreach ($sessionFiles as $type => $info) {
+                        if (!file_exists($info['tmp_path'])) continue;
+                        $ext   = strtolower(pathinfo($info['name'], PATHINFO_EXTENSION));
+                        $fname = uniqid($type . '_', true) . '.' . $ext;
+                        rename($info['tmp_path'], $uploadDir . $fname);
+                        $pdo->prepare('INSERT INTO assistance_documents (request_id,doc_type,filename,original_name,file_size) VALUES (?,?,?,?,?)')
+                            ->execute([$reqId, $type, $fname, $info['name'], $info['size']]);
+                    }
+
+                    // Clear session temp files
+                    unset($_SESSION['temp_files_' . $userId]);
+
+                    // Timeline + notifications
+                    $pdo->prepare('INSERT INTO assistance_timeline (request_id,status,note) VALUES (?,?,?)')
+                        ->execute([$reqId,'Submitted','Request submitted by organization representative.']);
+                    $admins = $pdo->query('SELECT id FROM admin_users WHERE is_active = TRUE')->fetchAll(PDO::FETCH_COLUMN);
+                    foreach ($admins as $aid) {
+                        $pdo->prepare('INSERT INTO notifications (admin_id,type,message,link) VALUES (?,?,?,?)')
+                            ->execute([$aid,'assistance','New assistance request: '.$title,'assistance.php?view='.$reqId]);
+                    }
+
+                    $formData    = [];
+                    $checkResult = null;
+                    $success     = 'Request submitted successfully! Request ID: #' . $reqId;
+                }
+            }
+        }
+    }
+
+    if ($action === 'comment') {
+        $reqId   = (int)$_POST['req_id'];
+        $comment = trim($_POST['comment'] ?? '');
+        if ($reqId && $comment) {
+            $pdo->prepare('INSERT INTO assistance_comments (request_id,author_id,author_type,comment) VALUES (?,?,?,?)')
+                ->execute([$reqId, $userId, 'youth', $comment]);
+            header('Location: assistance.php?view=' . $reqId); exit;
+        }
+    }
+}
+
+// Restore session temp file info for display
+$sessionFiles = $_SESSION['temp_files_' . $userId] ?? [];
+
+//  View single request 
+$viewId  = (int)($_GET['view'] ?? 0);
+$viewReq = null;
+if ($viewId) {
+    $s = $pdo->prepare('SELECT r.*,o.name as org_name FROM assistance_requests r JOIN organizations o ON o.id=r.organization_id WHERE r.id=? AND r.submitted_by=?');
+    $s->execute([$viewId,$userId]);
+    $viewReq = $s->fetch();
+}
+
+//  Load user orgs and requests 
+$userOrgs = $pdo->query('SELECT id,name FROM organizations WHERE is_active = TRUE ORDER BY name')->fetchAll();
+$myReqs   = $pdo->prepare('SELECT r.*,o.name as org_name FROM assistance_requests r JOIN organizations o ON o.id=r.organization_id WHERE r.submitted_by=? ORDER BY r.created_at DESC');
+$myReqs->execute([$userId]);
+$myRequests = $myReqs->fetchAll();
+
+// Unread notifications
+$notifs = $pdo->prepare('SELECT * FROM notifications WHERE user_id=? AND is_read=FALSE ORDER BY created_at DESC LIMIT 5');
+$notifs->execute([$userId]);
+$notifications = $notifs->fetchAll();
+if ($notifications) {
+    $pdo->prepare('UPDATE notifications SET is_read=TRUE WHERE user_id=?')->execute([$userId]);
+}
+?>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Assistance Request  LYDO</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet"/>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css"/>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{--blue:#1565c0;--blue-dark:#0d3b6e;--blue-pale:#e3f2fd;--green:#2e7d32;--green-pale:#e8f5e9;--gray-50:#f8fafc;--gray-100:#f1f5f9;--gray-200:#e2e8f0;--gray-600:#475569;--gray-800:#1e293b}
+body{font-family:Inter,sans-serif;background:var(--gray-50);color:var(--gray-800)}
+.topbar{background:linear-gradient(135deg,var(--blue-dark),var(--blue));padding:0 28px;height:62px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:100;box-shadow:0 2px 12px rgba(0,0,0,.15)}
+.t-logo{display:flex;align-items:center;gap:10px;color:#fff;text-decoration:none}
+.t-logo-icon{width:36px;height:36px;border-radius:9px;background:rgba(255,255,255,.15);display:flex;align-items:center;justify-content:center;font-size:1rem}
+.t-right{display:flex;align-items:center;gap:10px}
+.btn-back{padding:7px 14px;background:rgba(255,255,255,.12);border:1px solid rgba(255,255,255,.2);border-radius:8px;color:#fff;font-family:inherit;font-size:.82rem;font-weight:600;cursor:pointer;text-decoration:none;transition:.2s;display:flex;align-items:center;gap:6px}
+.btn-back:hover{background:rgba(255,255,255,.22)}
+.notif-badge{background:#e53935;color:#fff;border-radius:50px;padding:2px 8px;font-size:.72rem;font-weight:700;margin-left:4px}
+.content{max-width:960px;margin:0 auto;padding:28px 20px}
+.page-title{font-size:1.5rem;font-weight:800;margin-bottom:4px}
+.page-sub{font-size:.9rem;color:var(--gray-600);margin-bottom:24px}
+.card{background:#fff;border-radius:14px;border:1px solid var(--gray-200);box-shadow:0 1px 4px rgba(0,0,0,.06);overflow:hidden;margin-bottom:20px}
+.card-header{padding:14px 20px;border-bottom:1px solid var(--gray-200);display:flex;align-items:center;gap:8px;background:linear-gradient(135deg,var(--blue-dark),var(--blue));color:#fff}
+.card-header h3{font-size:.95rem;font-weight:700}
+.card-header i{font-size:.9rem}
+.card-body{padding:22px}
+.section-title{font-size:.88rem;font-weight:700;color:var(--blue-dark);margin:20px 0 14px;padding-bottom:8px;border-bottom:2px solid var(--blue-pale);display:flex;align-items:center;gap:7px}
+.section-title:first-child{margin-top:0}
+.fg{display:flex;flex-direction:column;gap:5px;margin-bottom:14px}
+.fg label{font-size:.83rem;font-weight:600;color:var(--gray-800)}
+.fg input,.fg select,.fg textarea{padding:9px 13px;border:1.5px solid var(--gray-200);border-radius:9px;font-family:inherit;font-size:.9rem;color:var(--gray-800);background:var(--gray-50);outline:none;transition:.2s;width:100%}
+.fg input:focus,.fg select:focus,.fg textarea:focus{border-color:#1e88e5;box-shadow:0 0 0 3px rgba(30,136,229,.1);background:#fff}
+.form-row-2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.form-row-3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px}
+.req{color:#e53935}
+.doc-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:8px}
+.doc-item{border:1.5px dashed var(--gray-200);border-radius:10px;padding:14px;position:relative;background:var(--gray-50);transition:.2s;cursor:pointer}
+.doc-item:hover{border-color:var(--blue);background:var(--blue-pale)}
+.doc-item.has-file{border-color:var(--green);background:var(--green-pale)}
+.doc-item label{display:flex;flex-direction:column;gap:5px;cursor:pointer}
+.doc-item .di{font-size:1.3rem;color:var(--gray-400)}
+.doc-item.has-file .di{color:var(--green)}
+.doc-item .dn{font-size:.83rem;font-weight:600;color:var(--gray-800)}
+.doc-item .dh{font-size:.75rem;color:var(--gray-600)}
+.doc-item input[type=file]{position:absolute;inset:0;opacity:0;cursor:pointer;width:100%;height:100%}
+.btn-submit{width:100%;padding:13px;background:linear-gradient(135deg,var(--blue-dark),var(--blue));color:#fff;border:none;border-radius:10px;font-family:inherit;font-size:.95rem;font-weight:700;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:10px;transition:.2s;box-shadow:0 4px 14px rgba(21,101,192,.3);margin-top:8px}
+.btn-submit:hover{transform:translateY(-2px);box-shadow:0 8px 24px rgba(21,101,192,.4)}
+.alert{padding:13px 16px;border-radius:10px;font-size:.88rem;font-weight:500;margin-bottom:20px;display:flex;align-items:flex-start;gap:10px}
+.alert.error{background:#ffebee;color:#c62828;border:1px solid rgba(198,40,40,.2)}
+.alert.success{background:var(--green-pale);color:var(--green);border:1px solid rgba(46,125,50,.2)}
+.req-card{border:1.5px solid var(--gray-200);border-radius:10px;padding:14px 16px;margin-bottom:10px;display:flex;align-items:center;justify-content:space-between;gap:12px;transition:.2s;text-decoration:none;color:var(--gray-800)}
+.req-card:hover{border-color:var(--blue);background:var(--blue-pale)}
+.req-title{font-weight:700;font-size:.9rem;margin-bottom:3px}
+.req-meta{font-size:.78rem;color:var(--gray-600)}
+.status-badge{display:inline-block;padding:3px 10px;border-radius:50px;font-size:.72rem;font-weight:700}
+.timeline{display:flex;flex-direction:column;gap:0}
+.tl-item{display:flex;gap:12px;padding:10px 0;position:relative}
+.tl-item:not(:last-child)::after{content:"";position:absolute;left:13px;top:32px;bottom:0;width:2px;background:#e2e8f0}
+.tl-dot{width:28px;height:28px;border-radius:50%;background:var(--blue);color:#fff;display:flex;align-items:center;justify-content:center;font-size:.75rem;flex-shrink:0;z-index:1}
+.tl-label{font-size:.85rem;font-weight:600;color:var(--gray-800);margin-top:4px}
+.tl-note{font-size:.78rem;color:#94a3b8;margin-top:2px}
+.comment-item{padding:10px 0;border-bottom:1px solid var(--gray-100)}
+.comment-item:last-child{border-bottom:none}
+.comment-author{font-size:.78rem;font-weight:700;margin-bottom:3px}
+.comment-text{font-size:.88rem;color:var(--gray-800);line-height:1.6}
+.comment-time{font-size:.72rem;color:#94a3b8;margin-top:2px}
+.info-row{display:flex;gap:8px;padding:7px 0;border-bottom:1px solid var(--gray-100);font-size:.85rem}
+.info-row:last-child{border-bottom:none}
+.info-label{width:150px;flex-shrink:0;color:var(--gray-600);font-weight:500}
+.info-val{color:var(--gray-800);font-weight:500}
+.notif-box{background:#fff8e1;border:1px solid #ffe082;border-radius:10px;padding:12px 16px;margin-bottom:16px}
+.notif-item{font-size:.85rem;color:#f57f17;padding:4px 0;display:flex;align-items:center;gap:8px}
+@media(max-width:600px){.form-row-2,.form-row-3,.doc-grid{grid-template-columns:1fr}.y-content{padding:16px}}
+</style>
+<link rel="stylesheet" href="youth.css"/>
+</head>
+<body>
+<?php include 'sidebar.php'; ?>
+<div class="y-main">
+<?php include 'topbar.php'; ?>
+<main class="y-content">
+
+<?php if (!empty($notifications)): ?>
+<div class="notif-box">
+  <div style="font-size:.8rem;font-weight:700;color:#f57f17;margin-bottom:6px"><i class="fas fa-bell"></i> New Notifications</div>
+  <?php foreach ($notifications as $n): ?>
+  <div class="notif-item"><i class="fas fa-circle" style="font-size:.4rem"></i><?=htmlspecialchars($n['message'])?></div>
+  <?php endforeach; ?>
+</div>
+<?php endif; ?>
+
+<?php if ($viewReq): ?>
+<?php
+$docs = $pdo->prepare('SELECT * FROM assistance_documents WHERE request_id=?');
+$docs->execute([$viewReq['id']]);
+$documents = $docs->fetchAll();
+$timeline = $pdo->prepare('SELECT * FROM assistance_timeline WHERE request_id=? ORDER BY created_at ASC');
+$timeline->execute([$viewReq['id']]);
+$timelineItems = $timeline->fetchAll();
+$comments = $pdo->prepare('SELECT c.*,CASE WHEN c.author_type="admin" THEN (SELECT full_name FROM admin_users WHERE id=c.author_id) ELSE (SELECT CONCAT(first_name," ",last_name) FROM youth_users WHERE id=c.author_id) END as author_name FROM assistance_comments c WHERE c.request_id=? ORDER BY c.created_at ASC');
+$comments->execute([$viewReq['id']]);
+$commentList = $comments->fetchAll();
+[$sc,$bg] = $statusColors[$viewReq['status']] ?? ['#475569','#f1f5f9'];
+?>
+<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px;flex-wrap:wrap;gap:10px">
+  <div>
+    <h2 style="font-size:1.3rem;font-weight:800"><?=htmlspecialchars($viewReq['title'])?></h2>
+    <p style="font-size:.85rem;color:#475569"><?=htmlspecialchars($viewReq['org_name'])?> &middot; Submitted <?=date('M j, Y',strtotime($viewReq['created_at']))?></p>
+  </div>
+  <div style="display:flex;align-items:center;gap:10px">
+    <span class="status-badge" style="background:<?=$bg?>;color:<?=$sc?>"><?=$statusLabels[$viewReq['status']]?></span>
+    <a href="assistance.php" style="padding:7px 14px;background:#f1f5f9;color:#475569;border:1.5px solid #e2e8f0;border-radius:8px;font-size:.82rem;font-weight:600;text-decoration:none"><i class="fas fa-arrow-left"></i> Back</a>
+  </div>
+</div>
+
+<div style="display:grid;grid-template-columns:1fr 1.4fr;gap:16px">
+  <div style="display:flex;flex-direction:column;gap:16px">
+    <div class="card">
+      <div class="card-header"><i class="fas fa-info-circle"></i><h3>Request Details</h3></div>
+      <div style="padding:4px 0">
+        <div class="info-row" style="padding:8px 18px"><span class="info-label">Organization</span><span class="info-val"><?=htmlspecialchars($viewReq['org_name'])?></span></div>
+        <div class="info-row" style="padding:8px 18px"><span class="info-label">Activity Type</span><span class="info-val"><?=htmlspecialchars($viewReq['request_type'] ?? 'N/A')?></span></div>
+        <div class="info-row" style="padding:8px 18px"><span class="info-label">Status</span><span class="info-val" style="color:<?=$sc?>;font-weight:700"><?=$statusLabels[$viewReq['status']]?></span></div>
+        <?php if (isset($viewReq['scheduled_date']) && $viewReq['scheduled_date']): ?>
+        <div class="info-row" style="padding:8px 18px"><span class="info-label">Scheduled Date</span><span class="info-val" style="color:#2e7d32;font-weight:700"><?=date('F j, Y',strtotime($viewReq['scheduled_date']))?></span></div>
+        <?php endif; ?>
+      </div>
+      <?php if (isset($viewReq['decline_reason']) && $viewReq['decline_reason']): ?>
+      <div style="padding:12px 18px;background:#ffebee;font-size:.83rem;color:#c62828"><strong>Decline Reason:</strong> <?=htmlspecialchars($viewReq['decline_reason'])?></div>
+      <?php endif; ?>
+    </div>
+
+    <div class="card">
+      <div class="card-header"><i class="fas fa-history"></i><h3>Timeline</h3></div>
+      <div style="padding:14px 18px">
+        <?php if (empty($timelineItems)): ?><p style="color:#94a3b8;font-size:.85rem;text-align:center">No updates yet.</p>
+        <?php else: ?><div class="timeline">
+          <?php foreach ($timelineItems as $tl): ?>
+          <div class="tl-item">
+            <div class="tl-dot"><i class="fas fa-check"></i></div>
+            <div><div class="tl-label"><?=htmlspecialchars($tl['status'])?></div>
+            <?php if ($tl['note']): ?><div class="tl-note"><?=htmlspecialchars($tl['note'])?></div><?php endif; ?>
+            <div class="tl-note"><?=date('M j, Y g:i A',strtotime($tl['created_at']))?></div></div>
+          </div>
+          <?php endforeach; ?></div>
+        <?php endif; ?>
+      </div>
+    </div>
+  </div>
+
+  <div style="display:flex;flex-direction:column;gap:16px">
+    <div class="card">
+      <div class="card-header"><i class="fas fa-paperclip"></i><h3>Documents (<?=count($documents)?>)</h3></div>
+      <div style="padding:8px 18px">
+        <?php if (empty($documents)): ?><p style="color:#94a3b8;font-size:.85rem;padding:12px 0;text-align:center">No documents uploaded.</p>
+        <?php else: foreach ($documents as $doc): ?>
+        <div style="display:flex;align-items:center;gap:10px;padding:9px 0;border-bottom:1px solid #f1f5f9;font-size:.85rem">
+          <i class="fas fa-file-alt" style="color:#1565c0;width:18px;flex-shrink:0"></i>
+          <div style="flex:1"><div style="font-weight:600"><?=htmlspecialchars(isset($docTypeLabels[$doc['doc_type']]) ? $docTypeLabels[$doc['doc_type']] : $doc['doc_type'])?></div>
+          <div style="font-size:.75rem;color:#94a3b8"><?=htmlspecialchars($doc['original_name'])?></div></div>
+        </div>
+        <?php endforeach; endif; ?>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header"><i class="fas fa-comments"></i><h3>Comments</h3></div>
+      <div style="padding:8px 18px;max-height:280px;overflow-y:auto">
+        <?php if (empty($commentList)): ?><p style="color:#94a3b8;font-size:.85rem;padding:12px 0;text-align:center">No comments yet.</p>
+        <?php else: foreach ($commentList as $c): ?>
+        <div class="comment-item">
+          <div class="comment-author" style="color:<?=$c['author_type']==='admin'?'#1565c0':'#2e7d32'?>"><?=htmlspecialchars($c['author_name'])?> <span style="font-weight:400;color:#94a3b8">(<?=ucfirst($c['author_type'])?>)</span></div>
+          <div class="comment-text"><?=nl2br(htmlspecialchars($c['comment']))?></div>
+          <div class="comment-time"><?=date('M j, Y g:i A',strtotime($c['created_at']))?></div>
+        </div>
+        <?php endforeach; endif; ?>
+      </div>
+      <div style="padding:14px 18px;border-top:1px solid #e2e8f0">
+        <form method="POST">
+          <input type="hidden" name="action" value="comment"/>
+          <input type="hidden" name="req_id" value="<?=$viewReq['id']?>"/>
+          <textarea name="comment" rows="2" placeholder="Add a comment..." style="width:100%;padding:9px 12px;border:1.5px solid #e2e8f0;border-radius:9px;font-family:inherit;font-size:.88rem;outline:none;resize:vertical;margin-bottom:8px" required></textarea>
+          <button type="submit" style="padding:8px 16px;background:#1565c0;color:#fff;border:none;border-radius:8px;font-family:inherit;font-size:.85rem;font-weight:600;cursor:pointer;display:flex;align-items:center;gap:6px"><i class="fas fa-paper-plane"></i> Send</button>
+        </form>
+      </div>
+    </div>
+  </div>
+</div>
+
+<?php else: ?>
+<div class="page-title"><i class="fas fa-hands-helping" style="color:#1565c0;margin-right:8px"></i>Assistance Requests</div>
+<p class="page-sub">Submit and track your organization's assistance requests to the LYDO office.</p>
+
+<?php if ($error): ?><div class="alert error"><i class="fas fa-exclamation-circle"></i><?=htmlspecialchars($error)?></div><?php endif; ?>
+<?php if ($success): ?><div class="alert success"><i class="fas fa-check-circle"></i><?=htmlspecialchars($success)?></div><?php endif; ?>
+
+<?php if (!empty($myRequests)): ?>
+<div class="card">
+  <div class="card-header"><i class="fas fa-list"></i><h3>My Requests (<?=count($myRequests)?>)</h3></div>
+  <div style="padding:14px 18px">
+    <?php foreach ($myRequests as $r):
+      [$sc,$bg] = $statusColors[$r['status']] ?? ['#475569','#f1f5f9'];
+    ?>
+    <a href="?view=<?=$r['id']?>" class="req-card">
+      <div>
+        <div class="req-title"><?=htmlspecialchars($r['title'])?></div>
+        <div class="req-meta"><?=htmlspecialchars($r['org_name'])?> &middot; <?=htmlspecialchars($r['request_type'] ?? 'N/A')?></div>
+      </div>
+      <span class="status-badge" style="background:<?=$bg?>;color:<?=$sc?>"><?=$statusLabels[$r['status']]?></span>
+    </a>
+    <?php endforeach; ?>
+  </div>
+</div>
+<?php endif; ?>
+
+<div class="card">
+  <div class="card-header"><i class="fas fa-file-alt"></i><h3>New Assistance Request</h3></div>
+  <div class="card-body">
+    <form method="POST" enctype="multipart/form-data">
+      <input type="hidden" name="action" value="submit"/>
+
+      <div class="section-title"><i class="fas fa-building"></i> Organization Information</div>
+      <div class="form-row-2">
+        <div class="fg"><label>Organization <span class="req">*</span></label>
+          <select name="organization_id" required>
+            <option value="">Select your organization</option>
+            <?php foreach ($userOrgs as $o): ?>
+              <option value="<?=$o['id']?>" <?=(($formData['organization_id']??'')==$o['id'])?'selected':''?>><?=htmlspecialchars($o['name'])?></option>
+            <?php endforeach; ?>
+          </select>
+        </div>
+        <div class="fg"><label>Organization ID / Code</label>
+          <input type="text" name="organization_id_text" placeholder="e.g. SK-BRG1-2026" value="<?=htmlspecialchars($formData['organization_id_text']??'')?>"/>
+        </div>
+      </div>
+      <div class="form-row-3">
+        <div class="fg"><label>Representative Name <span class="req">*</span></label>
+          <input type="text" name="representative_name" required placeholder="Full name" value="<?=htmlspecialchars($formData['representative_name']??'')?>"/>
+        </div>
+        <div class="fg"><label>Contact Number <span class="req">*</span></label>
+          <input type="tel" name="contact_number" required placeholder="09XX-XXX-XXXX" value="<?=htmlspecialchars($formData['contact_number']??'')?>"/>
+        </div>
+        <div class="fg"><label>Email Address</label>
+          <input type="email" name="contact_email" placeholder="email@example.com" value="<?=htmlspecialchars($formData['contact_email']??'')?>"/>
+        </div>
+      </div>
+
+      <div class="section-title"><i class="fas fa-calendar-alt"></i> Activity Information</div>
+      <div class="form-row-2">
+        <div class="fg"><label>Project / Activity Title <span class="req">*</span></label>
+          <input type="text" name="title" required placeholder="e.g. Youth Leadership Camp 2026" value="<?=htmlspecialchars($formData['title']??'')?>"/>
+        </div>
+        <div class="fg"><label>Activity Type</label>
+          <select name="activity_type">
+            <option value="">Select type</option>
+            <?php foreach ($activityTypes as $t): ?>
+              <option value="<?=$t?>" <?=(($formData['activity_type']??'')===$t)?'selected':''?>><?=$t?></option>
+            <?php endforeach; ?>
+          </select>
+        </div>
+      </div>
+      <div class="fg"><label>Activity Description <span class="req">*</span></label>
+        <textarea name="description" rows="3" required placeholder="Describe the activity in detail..."><?=htmlspecialchars($formData['description']??'')?></textarea>
+      </div>
+      <div class="fg"><label>Objectives</label>
+        <textarea name="objectives" rows="2" placeholder="List the objectives of this activity..."><?=htmlspecialchars($formData['objectives']??'')?></textarea>
+      </div>
+      <div class="fg"><label>Expected Outcomes</label>
+        <textarea name="expected_outcome" rows="2" placeholder="What are the expected results or outcomes?"><?=htmlspecialchars($formData['expected_outcome']??'')?></textarea>
+      </div>
+      <div class="form-row-3">
+        <div class="fg"><label>Target Participants</label>
+          <input type="number" name="participants" placeholder="e.g. 50" min="1" value="<?=htmlspecialchars($formData['participants']??'')?>"/>
+        </div>
+        <div class="fg"><label>Proposed Date</label>
+          <input type="date" name="target_date" value="<?=htmlspecialchars($formData['target_date']??'')?>"/>
+        </div>
+        <div class="fg"><label>Venue</label>
+          <input type="text" name="target_venue" placeholder="e.g. Municipal Hall" value="<?=htmlspecialchars($formData['target_venue']??'')?>"/>
+        </div>
+      </div>
+      <div class="fg"><label>Estimated Budget (&#8369;)</label>
+        <input type="number" name="budget_requested" placeholder="0.00" min="0" step="0.01" value="<?=htmlspecialchars($formData['budget_requested']??'')?>"/>
+      </div>
+
+      <div class="section-title"><i class="fas fa-paperclip"></i> Supporting Documents <span style="font-weight:400;color:#94a3b8;font-size:.8rem">(PDF, DOC, JPG, PNG � max 10MB each)</span></div>
+      <?php
+      // Show which files are saved in session temp
+      $sessionFiles = $_SESSION['temp_files_' . $userId] ?? [];
+      ?>
+      <div class="doc-grid">
+        <?php foreach (['request_letter'=>'Request Letter','project_proposal'=>'Project Proposal','participant_list'=>'Participant List','sk_endorsement'=>'SK Endorsement'] as $type => $label):
+          $saved = $sessionFiles[$type] ?? null;
+          $hasSaved = $saved && file_exists($saved['tmp_path']);
+        ?>
+        <div class="doc-item <?=$hasSaved?'has-file':''?>" id="dw_<?=$type?>">
+          <label>
+            <i class="fas <?=$hasSaved?'fa-check-circle':'fa-file-upload'?> di" id="di_<?=$type?>"></i>
+            <span class="dn"><?=$label?></span>
+            <span class="dh" id="dh_<?=$type?>"><?=$hasSaved?'? '.htmlspecialchars($saved['name']).' (saved � re-upload to replace)':'Click to upload'?></span>
+            <input type="file" name="<?=$type?>" accept=".pdf,.doc,.docx,.jpg,.jpeg,.png" onchange="markDoc('<?=$type?>',this)"/>
+          </label>
+        </div>
+        <?php endforeach; ?>
+      </div>
+
+      <!-- SMART CHECK RESULTS (shown after first submit attempt) -->
+      <?php if ($checkResult): ?>
+      <div style="border:1.5px solid #e2e8f0;border-radius:12px;overflow:hidden;margin-bottom:16px">
+        <div style="padding:12px 18px;background:linear-gradient(135deg,#0d3b6e,#1565c0);color:#fff;display:flex;align-items:center;justify-content:space-between">
+          <span style="font-weight:700;font-size:.9rem"><i class="fas fa-robot" style="margin-right:7px"></i>Smart Submission Check</span>
+          <span style="background:<?=$checkResult['proposal']['color']?>;color:#fff;padding:3px 12px;border-radius:50px;font-size:.78rem;font-weight:700">
+            <?=$checkResult['proposal']['icon']?> <?=$checkResult['proposal']['rating']?> � <?=$checkResult['proposal']['score']?>%
+          </span>
+        </div>
+
+        <!-- Score bar -->
+        <div style="padding:14px 18px;border-bottom:1px solid #e2e8f0;background:#f8fafc">
+          <div style="display:flex;justify-content:space-between;font-size:.78rem;color:#475569;margin-bottom:6px">
+            <span>Proposal Completeness</span><span style="font-weight:700;color:<?=$checkResult['proposal']['color']?>"><?=$checkResult['proposal']['score']?>%</span>
+          </div>
+          <div style="height:10px;background:#e2e8f0;border-radius:50px;overflow:hidden">
+            <div style="height:100%;width:<?=$checkResult['proposal']['score']?>%;background:<?=$checkResult['proposal']['color']?>;border-radius:50px;transition:width .6s ease"></div>
+          </div>
+        </div>
+
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:0">
+          <!-- Document Check -->
+          <div style="padding:14px 18px;border-right:1px solid #e2e8f0">
+            <div style="font-size:.8rem;font-weight:700;color:#1e293b;margin-bottom:10px"><i class="fas fa-paperclip" style="color:#1565c0;margin-right:5px"></i>Document Check</div>
+            <?php foreach (REQUIRED_DOCS as $type => $label):
+              $hasIssue = array_filter($checkResult['doc_issues'], fn($i) => $i['field'] === $type);
+              $hasWarn  = array_filter($checkResult['doc_warnings'], fn($w) => $w['field'] === $type);
+              $uploaded = in_array($type, $checkResult['doc_uploaded']);
+            ?>
+            <div style="display:flex;align-items:center;gap:8px;padding:5px 0;font-size:.83rem">
+              <?php if ($hasIssue): ?>
+                <i class="fas fa-times-circle" style="color:#c62828;width:16px"></i>
+                <span style="color:#c62828"><?=$label?> � Missing</span>
+              <?php elseif ($hasWarn): ?>
+                <i class="fas fa-exclamation-triangle" style="color:#f57f17;width:16px"></i>
+                <span style="color:#f57f17"><?=$label?> � Possible duplicate</span>
+              <?php elseif ($uploaded): ?>
+                <i class="fas fa-check-circle" style="color:#2e7d32;width:16px"></i>
+                <span style="color:#2e7d32"><?=$label?> � OK</span>
+              <?php else: ?>
+                <i class="fas fa-circle" style="color:#94a3b8;width:16px;font-size:.5rem"></i>
+                <span style="color:#94a3b8"><?=$label?> � Not uploaded</span>
+              <?php endif; ?>
+            </div>
+            <?php endforeach; ?>
+          </div>
+
+          <!-- Proposal Review -->
+          <div style="padding:14px 18px">
+            <div style="font-size:.8rem;font-weight:700;color:#1e293b;margin-bottom:10px"><i class="fas fa-clipboard-check" style="color:#1565c0;margin-right:5px"></i>Proposal Review</div>
+            <?php if (!empty($checkResult['proposal']['suggestions'])): ?>
+              <?php foreach ($checkResult['proposal']['suggestions'] as $s): ?>
+              <div style="display:flex;align-items:flex-start;gap:7px;padding:4px 0;font-size:.8rem;color:#c62828">
+                <i class="fas fa-exclamation-circle" style="margin-top:2px;flex-shrink:0"></i>
+                <span><?=$s['message']?></span>
+              </div>
+              <?php endforeach; ?>
+            <?php else: ?>
+              <div style="color:#2e7d32;font-size:.85rem"><i class="fas fa-check-circle"></i> Proposal looks complete!</div>
+            <?php endif; ?>
+            <?php if (!empty($checkResult['proposal']['strengths'])): ?>
+            <div style="margin-top:8px;font-size:.75rem;color:#2e7d32">
+              <strong>? Complete:</strong> <?=implode(', ',$checkResult['proposal']['strengths'])?>
+            </div>
+            <?php endif; ?>
+          </div>
+        </div>
+
+        <?php if (!$checkResult['can_submit']): ?>
+        <div style="padding:10px 18px;background:#ffebee;font-size:.83rem;color:#c62828;border-top:1px solid #e2e8f0">
+          <i class="fas fa-lock"></i> <strong>Cannot submit yet.</strong> Fix the issues above before submitting.
+        </div>
+        <?php else: ?>
+        <div style="padding:10px 18px;background:#e8f5e9;font-size:.83rem;color:#2e7d32;border-top:1px solid #e2e8f0">
+          <i class="fas fa-check-circle"></i> <strong>Ready to submit!</strong> Your request passed all checks.
+        </div>
+        <?php endif; ?>
+      </div>
+      <?php endif; ?>
+
+      <button type="submit" name="check_only" value="1" style="width:100%;padding:11px;background:#f1f5f9;color:#1565c0;border:1.5px solid #90caf9;border-radius:10px;font-family:inherit;font-size:.9rem;font-weight:700;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:8px;margin-bottom:10px;transition:.2s" onmouseover="this.style.background='#e3f2fd'" onmouseout="this.style.background='#f1f5f9'">
+        <i class="fas fa-search"></i> Check My Submission First
+      </button>
+      <button type="submit" class="btn-submit" <?=($checkResult && !$checkResult['can_submit']) ? 'disabled style="opacity:.5;cursor:not-allowed"' : ''?>>
+        <i class="fas fa-paper-plane"></i> Submit Assistance Request
+      </button>
+    </form>
+  </div>
+</div>
+<?php endif; ?>
+</main>
+</div>
+<script>
+function markDoc(type,input){
+  if(input.files[0]){
+    document.getElementById('dw_'+type).classList.add('has-file');
+    document.getElementById('di_'+type).className='fas fa-check-circle di';
+    document.getElementById('dh_'+type).textContent=input.files[0].name;
+  }
+}
+// Sidebar toggle
+const hamburger = document.getElementById('yHamburger');
+const sidebar   = document.getElementById('ySidebar');
+const overlay   = document.getElementById('yOverlay');
+const closeBtn  = document.getElementById('ySidebarClose');
+function openSidebar()  { sidebar.classList.add('open'); overlay.classList.add('open'); }
+function closeSidebar() { sidebar.classList.remove('open'); overlay.classList.remove('open'); }
+hamburger.addEventListener('click', openSidebar);
+closeBtn.addEventListener('click',  closeSidebar);
+overlay.addEventListener('click',   closeSidebar);
+</script>
+</body></html>

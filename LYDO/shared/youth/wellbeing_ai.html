@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Wellbeing Assistant</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet"/>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css"/>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:Inter,sans-serif;background:#f8fafc;overflow:hidden;height:100vh;display:flex;flex-direction:column}
+#chatContainer{flex:1;display:flex;flex-direction:column;overflow:hidden;padding:12px;gap:10px}
+#chatMessages{flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:8px;padding-right:6px}
+#chatMessages::-webkit-scrollbar{width:5px}
+#chatMessages::-webkit-scrollbar-thumb{background:#cbd5e1;border-radius:3px}
+#chatMessages::-webkit-scrollbar-thumb:hover{background:#94a3b8}
+.message{display:flex;gap:8px;animation:fadeIn .3s ease}
+@keyframes fadeIn{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:translateY(0)}}
+.message.user{flex-direction:row-reverse}
+.message-avatar{width:28px;height:28px;border-radius:50%;display:flex;align-items:center;justify-content:center;flex-shrink:0;font-size:.75rem;font-weight:700}
+.message.ai .message-avatar{background:linear-gradient(135deg,#1565c0,#1e88e5);color:#fff}
+.message.user .message-avatar{background:linear-gradient(135deg,#0d3b6e,#1565c0);color:#fff}
+.message-content{max-width:75%;padding:8px 12px;border-radius:10px;font-size:.8rem;line-height:1.5;word-wrap:break-word}
+.message.ai .message-content{background:#fff;color:#1e293b;border:1px solid #e2e8f0}
+.message.user .message-content{background:linear-gradient(135deg,#1565c0,#1e88e5);color:#fff}
+.typing-indicator{display:none;padding:8px 12px;background:#fff;border:1px solid #e2e8f0;border-radius:10px;width:55px}
+.typing-indicator span{display:inline-block;width:6px;height:6px;border-radius:50%;background:#94a3b8;animation:typing 1.4s infinite}
+.typing-indicator span:nth-child(2){animation-delay:.2s}
+.typing-indicator span:nth-child(3){animation-delay:.4s}
+@keyframes typing{0%,60%,100%{opacity:.3}30%{opacity:1}}
+#inputArea{display:flex;gap:6px;padding:12px;background:#fff;border-top:1px solid #e2e8f0}
+#messageInput{flex:1;padding:8px 12px;border:1.5px solid #e2e8f0;border-radius:8px;font-family:inherit;font-size:.8rem;outline:none;resize:none;max-height:70px}
+#messageInput:focus{border-color:#1565c0}
+#sendBtn{padding:8px 14px;background:linear-gradient(135deg,#1565c0,#1e88e5);color:#fff;border:none;border-radius:8px;cursor:pointer;font-size:.8rem;font-weight:600;display:flex;align-items:center;gap:5px;transition:.2s;white-space:nowrap}
+#sendBtn:hover{transform:translateY(-1px);box-shadow:0 4px 12px rgba(21,101,192,.3)}
+#sendBtn:disabled{opacity:.5;cursor:not-allowed;transform:none}
+.quick-action{display:inline-flex;align-items:center;gap:5px;padding:6px 10px;background:#fff;border:1.5px solid #e2e8f0;border-radius:7px;font-size:.75rem;color:#475569;cursor:pointer;transition:.2s;margin:3px}
+.quick-action:hover{border-color:#1565c0;color:#1565c0}
+</style>
+</head>
+<body>
+
+<div id="chatContainer">
+  <div id="chatMessages">
+    <div class="message ai">
+      <div class="message-avatar"><i class="fas fa-brain"></i></div>
+      <div class="message-content">
+        Hi! 👋 I'm your LYDO Well-being Assistant powered by AI. I can help you with mental health, academics, career advice, technology questions, and anything else you'd like to discuss! What's on your mind today? 💙
+      </div>
+    </div>
+    <div style="display:flex;flex-wrap:wrap;margin:4px 0">
+      <div class="quick-action" onclick="sendQuickMessage('I\'m feeling stressed')">😰 Stressed</div>
+      <div class="quick-action" onclick="sendQuickMessage('I need study tips')">📚 Study Tips</div>
+      <div class="quick-action" onclick="sendQuickMessage('Career advice please')">💼 Career</div>
+      <div class="quick-action" onclick="sendQuickMessage('What is AI?')">💻 Technology</div>
+    </div>
+  </div>
+  <div class="message ai" id="typingIndicator" style="display:none">
+    <div class="message-avatar"><i class="fas fa-brain"></i></div>
+    <div class="typing-indicator">
+      <span></span><span></span><span></span>
+    </div>
+  </div>
+</div>
+
+<div id="inputArea">
+  <textarea id="messageInput" placeholder="Type your message..." rows="1" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendMessage()}"></textarea>
+  <button id="sendBtn" onclick="sendMessage()">
+    <i class="fas fa-paper-plane"></i> Send
+  </button>
+</div>
+
+<script>
+const chatMessages = document.getElementById('chatMessages');
+const messageInput = document.getElementById('messageInput');
+const sendBtn = document.getElementById('sendBtn');
+const typingIndicator = document.getElementById('typingIndicator');
+
+function scrollToBottom() {
+  chatMessages.scrollTop = chatMessages.scrollHeight;
+}
+
+function addMessage(content, isUser = false) {
+  const msgDiv = document.createElement('div');
+  msgDiv.className = `message ${isUser ? 'user' : 'ai'}`;
+  
+  // Convert markdown-like formatting to HTML
+  const formattedContent = content
+    .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+    .replace(/\n/g, '<br>')
+    .replace(/•\s*/g, '• ');
+  
+  msgDiv.innerHTML = `
+    <div class="message-avatar">
+      <i class="fas fa-${isUser ? 'user' : 'brain'}"></i>
+    </div>
+    <div class="message-content">${formattedContent}</div>
+  `;
+  chatMessages.appendChild(msgDiv);
+  scrollToBottom();
+}
+
+function showTyping() {
+  typingIndicator.style.display = 'flex';
+  scrollToBottom();
+}
+
+function hideTyping() {
+  typingIndicator.style.display = 'none';
+}
+
+async function sendMessage() {
+  const message = messageInput.value.trim();
+  if (!message) return;
+  
+  addMessage(message, true);
+  messageInput.value = '';
+  messageInput.style.height = 'auto';
+  sendBtn.disabled = true;
+  
+  showTyping();
+  
+  try {
+    const formData = new FormData();
+    formData.append('ajax_chat', '1');
+    formData.append('message', message);
+    
+    const response = await fetch('wellbeing_ai.php', {
+      method: 'POST',
+      body: formData
+    });
+    
+    const data = await response.json();
+    hideTyping();
+    
+    if (data.reply) {
+      addMessage(data.reply);
+    } else {
+      addMessage('Sorry, I encountered an error. Please try again.');
+    }
+  } catch (error) {
+    console.error('Error:', error);
+    hideTyping();
+    addMessage('I\'m having trouble connecting. Please try again.');
+  }
+  
+  sendBtn.disabled = false;
+}
+
+function sendQuickMessage(message) {
+  messageInput.value = message;
+  sendMessage();
+}
+
+// Auto-resize textarea
+messageInput.addEventListener('input', function() {
+  this.style.height = 'auto';
+  this.style.height = Math.min(this.scrollHeight, 80) + 'px';
+});
+</script>
+
+</body>
+</html>

@@ -1,0 +1,6 @@
+<br />
+<b>Warning</b>:  Undefined array key "filename" in <b>C:\xampp\htdocs\LYDO\lydo-system\admin2\view_file.php</b> on line <b>29</b><br />
+<br />
+<b>Warning</b>:  Undefined array key "filename" in <b>C:\xampp\htdocs\LYDO\lydo-system\admin2\view_file.php</b> on line <b>37</b><br />
+<br />
+<b>Warning</b>:  readfile(C:\xampp\htdocs\LYDO\lydo-system\admin2/../shared/uploads/assistance/): Failed to open stream: No such file or directory in <b>C:\xampp\htdocs\LYDO\lydo-system\admin2\view_file.php</b> on line <b>53</b><br />

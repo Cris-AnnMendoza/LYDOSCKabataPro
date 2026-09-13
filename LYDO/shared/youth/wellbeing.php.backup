@@ -1,0 +1,701 @@
+
+<?php
+require_once __DIR__ . '/../config.php';
+if (empty($_SESSION['user_id'])) { header('Location: ../../login.php'); exit; }
+
+$pdo    = db();
+$userId = (int)$_SESSION['user_id'];
+
+$uStmt = $pdo->prepare('SELECT * FROM youth_users WHERE id=? LIMIT 1');
+$uStmt->execute([$userId]);
+$user = $uStmt->fetch();
+
+$nc = $pdo->prepare('SELECT COUNT(*) FROM notifications WHERE user_id=? AND is_read=0');
+$nc->execute([$userId]);
+$notifCount = (int)$nc->fetchColumn();
+
+// ── Ensure chat history table ─────────────────────────────
+$pdo->exec("CREATE TABLE IF NOT EXISTS wellbeing_chats (
+    id         INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    user_id    INT UNSIGNED NOT NULL,
+    role       ENUM('user','bot') NOT NULL,
+    message    TEXT NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_user (user_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+
+// ── AJAX: process message ─────────────────────────────────
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_chat'])) {
+    header('Content-Type: application/json');
+    $msg = trim($_POST['message'] ?? '');
+    if (!$msg || mb_strlen($msg) > 1000) {
+        echo json_encode(['reply' => 'Please send a valid message (max 1000 characters).']);
+        exit;
+    }
+
+    // Save user message
+    $pdo->prepare('INSERT INTO wellbeing_chats (user_id,role,message) VALUES (?,?,?)')
+        ->execute([$userId, 'user', $msg]);
+
+    // Generate AI response
+    $reply = generateWellbeingReply($msg, $user, $pdo, $userId);
+
+    // Save bot reply
+    $pdo->prepare('INSERT INTO wellbeing_chats (user_id,role,message) VALUES (?,?,?)')
+        ->execute([$userId, 'bot', $reply]);
+
+    echo json_encode(['reply' => $reply]);
+    exit;
+}
+
+// ── AJAX: clear history ───────────────────────────────────
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['clear_chat'])) {
+    header('Content-Type: application/json');
+    $pdo->prepare('DELETE FROM wellbeing_chats WHERE user_id=?')->execute([$userId]);
+    echo json_encode(['ok' => true]);
+    exit;
+}
+
+// ── Load recent chat history ──────────────────────────────
+$histStmt = $pdo->prepare('SELECT role, message, created_at FROM wellbeing_chats WHERE user_id=? ORDER BY created_at ASC LIMIT 100');
+$histStmt->execute([$userId]);
+$history = $histStmt->fetchAll();
+
+$firstName = $user['first_name'] ?? 'Friend';
+
+// ════════════════════════════════════════════════════════
+// WELL-BEING AI ENGINE
+// ════════════════════════════════════════════════════════
+function generateWellbeingReply(string $input, array $user, PDO $pdo, int $userId): string {
+    $text  = mb_strtolower($input);
+    $name  = $user['first_name'] ?? 'Friend';
+
+    // ── Crisis detection (highest priority) ──────────────
+    $crisisWords = ['suicid','kill myself','end my life','want to die','no reason to live','self harm','hurt myself','cut myself','overdose','wala na akong dahilan','gusto ko nang mamatay','ayaw ko na mabuhay','papatayin ko sarili'];
+    foreach ($crisisWords as $w) {
+        if (str_contains($text, $w)) {
+
+            // Load LYDO coordinators/assistants from DB
+            $coordStmt = $pdo->prepare("SELECT full_name, email FROM admin_users WHERE role IN ('super_admin','youth_coordinator') AND is_active=1 ORDER BY role ASC LIMIT 3");
+            $coordStmt->execute();
+            $coords = $coordStmt->fetchAll();
+
+            // Alert all active admins via notification
+            $alertMsg = '🚨 URGENT: Youth user ' . ($user['first_name'] ?? '') . ' ' . ($user['last_name'] ?? '') . ' (ID #' . $userId . ') may be in crisis. Please check in immediately.';
+            $adminStmt = $pdo->prepare("SELECT id FROM admin_users WHERE is_active=1");
+            $adminStmt->execute();
+            $adminIds = $adminStmt->fetchAll(PDO::FETCH_COLUMN);
+            foreach ($adminIds as $aid) {
+                try {
+                    $pdo->prepare("INSERT INTO notifications (user_id, title, message, type) VALUES (?, ?, ?, ?)")
+                        ->execute([$userId, '🚨 Crisis Alert', $alertMsg, 'error']);
+                } catch (PDOException $e) {}
+            }
+            // Also log in wellbeing_chats as a system alert
+            try {
+                $pdo->prepare("INSERT INTO wellbeing_chats (user_id, role, message) VALUES (?, 'bot', ?)")
+                    ->execute([$userId, '[SYSTEM ALERT: Crisis keywords detected. Admin notified.]']);
+            } catch (PDOException $e) {}
+
+            // Build coordinator contact list — show only name and email
+            $coordList = '';
+            if (!empty($coords)) {
+                $coordList = "\n\n**Your LYDO Assistants are here for you:**\n";
+                foreach ($coords as $c) {
+                    $coordList .= "👤 **{$c['full_name']}** — {$c['email']}\n";
+                }
+            } else {
+                $coordList = "\n\n� Please contact the LYDO office directly for immediate assistance.";
+            }
+
+            return "💙 **{$name}, I'm really concerned about what you just shared.**\n\n" .
+                   "Please know that **you are not alone**, and what you're feeling right now is real. Help is available — right now.\n\n" .
+                   "🚨 **Please reach out immediately:**\n\n" .
+                   "📞 **Hopeline PH:** 1553 (24/7, free)\n" .
+                   "📞 **NCMH Crisis Line:** (02) 8989-8727\n" .
+                   "📞 **Emergency:** 911\n" .
+                   $coordList . "\n\n" .
+                   "---\n" .
+                   "✅ **I have already alerted your LYDO assistants.** A coordinator will reach out to check on you.\n\n" .
+                   "You matter. Your life has value. Please talk to someone right now — a family member, friend, teacher, or any of the contacts above. 🙏";
+        }
+    }
+    $greetings = ['hello','hi','hey','good morning','good afternoon','good evening','kumusta','kamusta','musta'];
+    foreach ($greetings as $g) {
+        if (str_contains($text, $g)) {
+            return "Hello, **{$name}**! 😊 I'm your LYDO Well-being Assistant. I'm here to listen and give you practical advice on:\n\n" .
+                   "• 😰 **Stress & Anxiety** — coping strategies\n" .
+                   "• 😔 **Sadness & Low mood** — emotional support\n" .
+                   "• 📚 **School & Studies** — focus and motivation tips\n" .
+                   "• 💼 **Career & Future** — guidance and direction\n" .
+                   "• 💑 **Relationships** — healthy boundaries\n" .
+                   "• 😴 **Sleep & Energy** — wellness habits\n" .
+                   "• 💪 **Self-confidence** — building self-worth\n\n" .
+                   "How are you feeling today? Tell me what's on your mind. 💬";
+        }
+    }
+
+    // ── How are you ───────────────────────────────────────
+    if (matchAny($text, ['how are you','kamusta ka','how do you feel'])) {
+        return "I'm here and ready to help you, {$name}! 😊 More importantly — **how are YOU feeling today?**\n\nFeel free to share anything that's been on your mind. Whether it's stress, school, relationships, or just needing someone to talk to — I'm listening. 💙";
+    }
+
+    // ── Stress ────────────────────────────────────────────
+    if (matchAny($text, ['stress','stressed','overwhelm','too much','burnout','burn out','pagod na','pagod','exhausted','drained','pressure'])) {
+        return buildResponse("😰 Stress & Overwhelm", $name, [
+            "It sounds like you're carrying a lot right now. That's completely valid — stress is your body's signal that something needs attention.",
+        ], [
+            "**Box Breathing:** Inhale 4 sec → Hold 4 sec → Exhale 4 sec → Hold 4 sec. Repeat 4x. This activates your calm response.",
+            "**Write it down:** List everything stressing you. Then circle only what you can control. Focus only on those.",
+            "**5-minute rule:** When overwhelmed, just commit to 5 minutes on one task. Starting is the hardest part.",
+            "**Take a real break:** Step outside, drink water, stretch. Your brain needs recovery time to function well.",
+            "**Talk to someone:** Sharing your stress cuts it in half. Tell a trusted friend or family member what you're going through.",
+            "**Prioritize ruthlessly:** Not everything is urgent. Use the Eisenhower Matrix — Urgent+Important first, everything else later.",
+        ], "What's the main source of your stress right now? I can give you more specific advice. 💬");
+    }
+
+    // ── Anxiety / Worry ───────────────────────────────────
+    if (matchAny($text, ['anxious','anxiety','nervous','worried','worry','panic','takot','natatakot','fear','scared','overthink','overthinking'])) {
+        return buildResponse("😟 Anxiety & Worry", $name, [
+            "Anxiety is your mind trying to protect you — but sometimes it goes into overdrive. You're not weak for feeling this way.",
+        ], [
+            "**Ground yourself (5-4-3-2-1):** Name 5 things you see, 4 you can touch, 3 you hear, 2 you smell, 1 you taste. This stops the anxiety spiral.",
+            "**Challenge the thought:** Ask yourself — 'Is this thought 100% true? What's the realistic outcome?' Most feared outcomes never happen.",
+            "**Limit news/social media:** Constant scrolling feeds anxiety. Set a 30-minute daily limit.",
+            "**Physical movement:** Even a 10-minute walk reduces anxiety hormones significantly.",
+            "**Journaling:** Write your worries down. Getting them out of your head and onto paper reduces their power.",
+            "**Breathe slowly:** Slow exhales (longer than inhales) activate your parasympathetic nervous system — your body's calm mode.",
+        ], "Is your anxiety about something specific — school, future, relationships? Tell me more so I can help better. 💙");
+    }
+
+    // ── Sadness / Depression ──────────────────────────────
+    if (matchAny($text, ['sad','sadness','depress','depressed','depression','malungkot','lungkot','unhappy','hopeless','empty','numb','crying','cry','alone','lonely','loneliness','walang kwenta','worthless','useless'])) {
+        return buildResponse("💙 Feeling Down", $name, [
+            "I hear you, {$name}. Feeling sad or empty is one of the hardest things to go through. Thank you for trusting me with this.",
+        ], [
+            "**Acknowledge it:** Don't fight the feeling. Say to yourself: 'I feel sad right now, and that's okay. It will pass.'",
+            "**Small wins:** When depressed, even getting out of bed is an achievement. Celebrate tiny victories.",
+            "**Sunlight & movement:** 15 minutes of sunlight and light exercise daily has proven antidepressant effects.",
+            "**Connect with one person:** Isolation makes sadness worse. Text or call one person you trust today.",
+            "**Limit alcohol & junk food:** These worsen mood significantly. Eat real food, drink water.",
+            "**Seek professional help:** If this has lasted more than 2 weeks, please talk to a counselor or doctor. There's no shame in getting help.",
+            "**LYDO programs:** Check out LYDO's Health & Wellness programs — connecting with community can lift your mood.",
+        ], "How long have you been feeling this way? I want to understand better. 💬");
+    }
+
+    // ── School / Studies ──────────────────────────────────
+    if (matchAny($text, ['school','study','studies','exam','grade','failing','fail','assignment','homework','thesis','project','teacher','professor','classmate','college','university','graduate','dropout','pag-aaral'])) {
+        return buildResponse("📚 School & Studies", $name, [
+            "School pressure is real — especially when you're juggling multiple responsibilities. Let's work through this together.",
+        ], [
+            "**Pomodoro Technique:** Study 25 minutes → 5-minute break → repeat. After 4 cycles, take a 20-minute break. This maximizes focus.",
+            "**Active recall:** Instead of re-reading notes, close them and try to recall the information. This doubles retention.",
+            "**Study environment:** Find a quiet, clean space. Your brain associates environments with activities.",
+            "**Ask for help early:** Don't wait until you're failing. Talk to your teacher/professor now — they want you to succeed.",
+            "**Break big tasks:** A thesis feels impossible. 'Write 200 words today' feels doable. Break everything down.",
+            "**Sleep is non-negotiable:** Studying while sleep-deprived is 40% less effective. Sleep consolidates memory.",
+            "**LYDO Scholarship:** If finances are affecting your studies, check LYDO's Education & Scholarship program.",
+        ], "What specific challenge are you facing in school? I can give more targeted advice. 📖");
+    }
+
+    // ── Career / Future ───────────────────────────────────
+    if (matchAny($text, ['career','job','work','future','lost','direction','purpose','goal','dream','ambition','unemployed','no job','trabaho','hanapbuhay','livelihood','skill','profession','course'])) {
+        return buildResponse("💼 Career & Future Direction", $name, [
+            "Feeling uncertain about your future is incredibly common — especially for young people. You're not behind. You're figuring it out.",
+        ], [
+            "**Identify your strengths:** List 5 things you're naturally good at. Your career should build on these.",
+            "**Explore, don't decide:** At your age, exploration beats commitment. Try different things — volunteer, intern, join clubs.",
+            "**LYDO Livelihood Program:** LYDO offers vocational training and skills workshops. These are free and practical.",
+            "**Network intentionally:** Talk to people doing work you find interesting. Ask them how they got there.",
+            "**Set a 90-day goal:** Instead of 'figure out my life,' try 'learn one new skill in 90 days.' Small, concrete goals build momentum.",
+            "**Volunteer:** Volunteering builds skills, connections, and clarity about what you enjoy. Check LYDO's Volunteer Program.",
+            "**It's okay to pivot:** Most successful people changed direction multiple times. Your path doesn't have to be linear.",
+        ], "What area of career or future are you most uncertain about? Let's dig deeper. 🎯");
+    }
+
+    // ── Relationships ─────────────────────────────────────
+    if (matchAny($text, ['relationship','boyfriend','girlfriend','breakup','break up','heartbreak','love','crush','friend','friendship','family','parents','conflict','fight','argument','toxic','abuse','bully','bullying','loneliness','miss someone'])) {
+        return buildResponse("💑 Relationships & Connections", $name, [
+            "Relationships — whether romantic, family, or friendships — are central to our well-being. It's okay to find them complicated.",
+        ], [
+            "**Set healthy boundaries:** It's okay to say no. Boundaries protect your energy and self-respect.",
+            "**Communicate directly:** Most relationship problems come from assumptions. Say what you mean, kindly and clearly.",
+            "**After a breakup:** Give yourself permission to grieve. Don't rush healing. Avoid contact for at least 30 days to reset.",
+            "**Toxic relationships:** If someone consistently makes you feel bad about yourself, that's a red flag. You deserve respect.",
+            "**Family conflict:** Try to understand their perspective first. Then express yours calmly. Timing matters — don't talk when emotions are high.",
+            "**Bullying:** Document it, report it to a trusted adult or authority, and don't face it alone. You have the right to feel safe.",
+            "**Quality over quantity:** One genuine friend is worth more than 100 acquaintances. Invest in deep connections.",
+        ], "Would you like to talk more about a specific relationship situation? I'm here to listen. 💬");
+    }
+
+    // ── Sleep ─────────────────────────────────────────────
+    if (matchAny($text, ['sleep','insomnia','cant sleep','no sleep','tired','fatigue','rest','gising','hindi makatulog','maaga','late night'])) {
+        return buildResponse("😴 Sleep & Rest", $name, [
+            "Sleep is the foundation of everything — mood, focus, health, and resilience. Poor sleep makes every problem feel worse.",
+        ], [
+            "**Consistent schedule:** Sleep and wake at the same time every day — even weekends. This sets your body clock.",
+            "**No screens 1 hour before bed:** Blue light suppresses melatonin (your sleep hormone). Read a book instead.",
+            "**Cool, dark room:** Your body temperature needs to drop to fall asleep. Keep your room cool and dark.",
+            "**No caffeine after 2pm:** Caffeine has a 6-hour half-life. That 4pm coffee is still in your system at 10pm.",
+            "**4-7-8 breathing:** Inhale 4 sec, hold 7 sec, exhale 8 sec. This is clinically proven to induce sleep.",
+            "**Write tomorrow's to-do list:** Unfinished tasks keep your brain active. Writing them down 'closes the loop.'",
+            "**Limit naps:** If you must nap, keep it under 20 minutes before 3pm.",
+        ], "How many hours of sleep are you getting? And what's keeping you awake? 🌙");
+    }
+
+    // ── Self-confidence / Self-worth ──────────────────────
+    if (matchAny($text, ['confidence','confident','self esteem','self-esteem','insecure','insecurity','ugly','not good enough','compare','comparison','social media','body image','shy','introvert','afraid to speak','public speaking','mahiyain'])) {
+        return buildResponse("💪 Self-Confidence & Self-Worth", $name, [
+            "Your worth is not determined by grades, looks, followers, or what others think. You are enough — right now, as you are.",
+        ], [
+            "**Stop comparing:** Social media shows highlights, not reality. Everyone is struggling with something you can't see.",
+            "**Daily affirmations:** Every morning, say 3 things you like about yourself. This rewires your brain over time.",
+            "**Competence builds confidence:** Don't wait to feel confident before acting. Act first — confidence follows.",
+            "**Dress intentionally:** How you present yourself affects how you feel. Wear something that makes you feel good.",
+            "**Celebrate small wins:** Keep a 'wins journal.' Write one thing you did well each day, no matter how small.",
+            "**Limit social media:** Studies show 30 min/day max significantly improves self-esteem, especially in youth.",
+            "**Develop a skill:** Mastery in any area — music, sports, coding, cooking — builds genuine confidence.",
+        ], "What specific situation makes you feel most insecure? Let's work on that together. 💙");
+    }
+
+    // ── Anger / Frustration ───────────────────────────────
+    if (matchAny($text, ['angry','anger','frustrated','frustration','mad','galit','inis','irritated','rage','hate','annoyed'])) {
+        return buildResponse("😤 Anger & Frustration", $name, [
+            "Anger is a valid emotion — it's telling you something important. The key is expressing it without causing harm.",
+        ], [
+            "**Pause before reacting:** When angry, wait 10 seconds before responding. This prevents regret.",
+            "**Physical release:** Exercise, punch a pillow, go for a run. Physical activity metabolizes stress hormones.",
+            "**Identify the real cause:** Anger is often a secondary emotion. Ask: 'What am I really feeling — hurt? Disrespected? Scared?'",
+            "**Use 'I' statements:** Say 'I feel hurt when...' instead of 'You always...' This prevents defensiveness.",
+            "**Write an unsent letter:** Write everything you want to say to the person — then don't send it. It releases the emotion.",
+            "**Cool down first:** Never make important decisions or have serious conversations when angry. Wait until you're calm.",
+        ], "What happened that made you feel this way? Sometimes talking it through helps. 💬");
+    }
+
+    // ── Motivation / Procrastination ──────────────────────
+    if (matchAny($text, ['motivat','procrastinat','lazy','tamad','no energy','unmotivated','give up','quit','wala nang gana','ayaw na','no drive','stuck','lost motivation'])) {
+        return buildResponse("🔥 Motivation & Getting Unstuck", $name, [
+            "Lack of motivation is often a sign of burnout, unclear goals, or fear of failure — not laziness. Let's fix this.",
+        ], [
+            "**Find your 'why':** Write down WHY your goal matters to you personally. Motivation follows meaning.",
+            "**2-minute rule:** If a task takes less than 2 minutes, do it now. This builds momentum.",
+            "**Environment design:** Remove distractions before you need willpower. Put your phone in another room.",
+            "**Accountability partner:** Tell someone your goal and ask them to check on you. Social commitment is powerful.",
+            "**Progress, not perfection:** Done is better than perfect. A messy first draft beats a blank page.",
+            "**Reward yourself:** Set up small rewards for completing tasks. Your brain responds to positive reinforcement.",
+            "**Rest is productive:** Sometimes low motivation means you need rest, not more pushing. Take a real day off.",
+        ], "What's the goal or task you're struggling to start? Let's break it down together. 🎯");
+    }
+
+    // ── Financial stress ──────────────────────────────────
+    if (matchAny($text, ['money','financial','broke','poor','mahirap','pera','gastos','budget','debt','utang','scholarship','allowance','no money'])) {
+        return buildResponse("💰 Financial Stress", $name, [
+            "Financial stress is one of the most common stressors for young people. You're not alone in this.",
+        ], [
+            "**Track every peso:** Use a simple notebook or app to track income and expenses. Awareness is the first step.",
+            "**50-30-20 rule:** 50% needs, 30% wants, 20% savings. Even saving ₱50/week builds a habit.",
+            "**LYDO Scholarship:** Apply for LYDO's Education & Scholarship program if you're a student in need.",
+            "**LYDO Livelihood Program:** Free skills training that can help you earn income.",
+            "**Avoid debt for wants:** Only borrow for genuine needs. High-interest debt creates a cycle that's hard to escape.",
+            "**Sell skills:** Can you tutor, do graphic design, cook, or do errands? Your skills have value.",
+            "**Seek assistance:** LYDO's Assistance Request program exists for situations like yours. Don't be afraid to apply.",
+        ], "What's your biggest financial challenge right now? I can point you to specific LYDO resources. 💬");
+    }
+
+    // ── Physical health ───────────────────────────────────
+    if (matchAny($text, ['health','sick','illness','pain','headache','stomachache','exercise','diet','eating','food','weight','fat','thin','body','physical','masakit','sakit'])) {
+        return buildResponse("🏃 Physical Health & Wellness", $name, [
+            "Physical and mental health are deeply connected. Taking care of your body is one of the most powerful things you can do for your mind.",
+        ], [
+            "**Move daily:** Even 20 minutes of walking improves mood, energy, and focus. You don't need a gym.",
+            "**Eat real food:** Processed food and sugar cause energy crashes and worsen mood. Prioritize rice, vegetables, protein.",
+            "**Hydrate:** Most people are mildly dehydrated. Drink 8 glasses of water daily — it affects energy and focus significantly.",
+            "**Don't skip meals:** Skipping meals causes blood sugar crashes that worsen anxiety and irritability.",
+            "**See a doctor:** If you have persistent physical symptoms, please see a health professional. Don't self-diagnose.",
+            "**LYDO Health & Wellness:** LYDO offers health programs and activities. Check the programs section.",
+            "**Limit vices:** Smoking, alcohol, and excessive caffeine all worsen mental and physical health long-term.",
+        ], "Is there a specific health concern you'd like to talk about? 💙");
+    }
+
+    // ── Gratitude / Positive ──────────────────────────────
+    if (matchAny($text, ['happy','grateful','thankful','blessed','good day','great','amazing','excited','masaya','nagpapasalamat','positive','doing well','feeling good'])) {
+        return "That's wonderful to hear, {$name}! 🌟 It's so important to acknowledge and celebrate the good moments.\n\n" .
+               "**To keep this positive energy going:**\n\n" .
+               "• 📓 **Gratitude journal:** Write 3 things you're grateful for each night. This trains your brain to notice the good.\n" .
+               "• 🌱 **Share it:** Positive emotions multiply when shared. Tell someone what made you happy today.\n" .
+               "• 🎯 **Ride the momentum:** Good days are great for tackling things you've been putting off.\n" .
+               "• 💪 **Build on it:** What made today good? How can you create more of that?\n\n" .
+               "Keep going, {$name}! You deserve every good thing coming your way. 😊 Is there anything you'd like to talk about or plan for?";
+    }
+
+    // ── Thank you ─────────────────────────────────────────
+    if (matchAny($text, ['thank','thanks','salamat','maraming salamat','thank you'])) {
+        return "You're very welcome, {$name}! 💙 That's what I'm here for.\n\nRemember — reaching out and talking about what you're going through takes courage. You're already doing something great for your well-being just by being here.\n\nIs there anything else on your mind? I'm always here to listen. 😊";
+    }
+
+    // ── Goodbye ───────────────────────────────────────────
+    if (matchAny($text, ['bye','goodbye','paalam','sige na','ingat','take care','see you'])) {
+        return "Take care of yourself, {$name}! 💙 Remember:\n\n" .
+               "✨ You are stronger than you think\n" .
+               "✨ It's okay to ask for help\n" .
+               "✨ Small steps forward still count\n\n" .
+               "Come back anytime you need to talk. I'll always be here. 🌟 Ingat! 😊";
+    }
+
+    // ── Default / General ─────────────────────────────────
+    return "Thank you for sharing that with me, {$name}. 💙\n\n" .
+           "I want to make sure I give you the most helpful response. Could you tell me a bit more about:\n\n" .
+           "• **How you're feeling** — emotionally (stressed, sad, anxious, angry, lost?)\n" .
+           "• **What's happening** — school, work, relationships, health, finances?\n" .
+           "• **What you need** — advice, someone to listen, practical tips, or resources?\n\n" .
+           "The more you share, the better I can help. I'm here and I'm listening. 💬";
+}
+
+function matchAny(string $text, array $keywords): bool {
+    foreach ($keywords as $kw) {
+        if (str_contains($text, $kw)) return true;
+    }
+    return false;
+}
+
+function buildResponse(string $topic, string $name, array $intro, array $tips, string $followUp): string {
+    $out = "**{$topic}**\n\n";
+    foreach ($intro as $line) {
+        $out .= $line . "\n\n";
+    }
+    $out .= "**Here are practical steps that can help:**\n\n";
+    foreach ($tips as $i => $tip) {
+        $out .= ($i + 1) . ". {$tip}\n\n";
+    }
+    $out .= "---\n{$followUp}";
+    return $out;
+}
+?>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Well-being Assistant – LYDO Youth Portal</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet"/>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css"/>
+<link rel="stylesheet" href="youth.css"/>
+<style>
+/* ── CHAT LAYOUT ── */
+.chat-wrap{display:flex;flex-direction:column;height:calc(100vh - 130px);max-width:820px;margin:0 auto}
+.chat-header{background:linear-gradient(135deg,#0d3b6e,#1565c0);border-radius:16px 16px 0 0;padding:16px 20px;display:flex;align-items:center;gap:14px;flex-shrink:0}
+.bot-avatar{width:46px;height:46px;border-radius:50%;background:rgba(255,255,255,.15);border:2px solid rgba(255,255,255,.3);display:flex;align-items:center;justify-content:center;font-size:1.3rem;flex-shrink:0}
+.bot-name{font-size:1rem;font-weight:800;color:#fff}
+.bot-status{font-size:.75rem;color:rgba(255,255,255,.7);display:flex;align-items:center;gap:5px;margin-top:2px}
+.status-dot{width:7px;height:7px;border-radius:50%;background:#43a047;animation:pulse 2s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+.chat-topics{display:flex;gap:6px;flex-wrap:wrap;padding:10px 16px;background:#f8fafc;border-bottom:1px solid #e2e8f0;flex-shrink:0}
+.topic-chip{padding:5px 12px;border-radius:50px;border:1.5px solid #e2e8f0;background:#fff;font-size:.75rem;font-weight:600;color:#475569;cursor:pointer;transition:.2s;white-space:nowrap}
+.topic-chip:hover{border-color:#1565c0;background:#e3f2fd;color:#1565c0}
+
+/* ── MESSAGES ── */
+.chat-messages{flex:1;overflow-y:auto;padding:20px 16px;background:#f8fafc;display:flex;flex-direction:column;gap:14px;scroll-behavior:smooth}
+.msg-row{display:flex;gap:10px;align-items:flex-end;animation:msgIn .25s ease}
+@keyframes msgIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+.msg-row.user{flex-direction:row-reverse}
+.msg-avatar{width:32px;height:32px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:.8rem;font-weight:700;flex-shrink:0}
+.msg-avatar.bot{background:linear-gradient(135deg,#0d3b6e,#1565c0);color:#fff}
+.msg-avatar.user{background:linear-gradient(135deg,#2e7d32,#43a047);color:#fff}
+.msg-bubble{max-width:75%;padding:12px 16px;border-radius:18px;font-size:.88rem;line-height:1.65;word-break:break-word}
+.msg-bubble.bot{background:#fff;border:1px solid #e2e8f0;border-bottom-left-radius:4px;box-shadow:0 1px 4px rgba(0,0,0,.06);color:#1e293b}
+.msg-bubble.user{background:linear-gradient(135deg,#1565c0,#1e88e5);color:#fff;border-bottom-right-radius:4px}
+.msg-time{font-size:.65rem;color:#94a3b8;margin-top:4px;text-align:right}
+.msg-time.bot-time{text-align:left}
+
+/* Markdown-like formatting in bot messages */
+.msg-bubble.bot strong{color:#0d3b6e;font-weight:700}
+.msg-bubble.bot em{color:#475569;font-style:italic}
+.msg-bubble.bot hr{border:none;border-top:1px solid #e2e8f0;margin:10px 0}
+
+/* ── TYPING INDICATOR ── */
+.typing-indicator{display:none;align-items:center;gap:10px}
+.typing-indicator.show{display:flex}
+.typing-dots{display:flex;gap:4px;padding:12px 16px;background:#fff;border:1px solid #e2e8f0;border-radius:18px;border-bottom-left-radius:4px}
+.typing-dots span{width:7px;height:7px;border-radius:50%;background:#94a3b8;animation:dot 1.2s infinite}
+.typing-dots span:nth-child(2){animation-delay:.2s}
+.typing-dots span:nth-child(3){animation-delay:.4s}
+@keyframes dot{0%,60%,100%{transform:translateY(0)}30%{transform:translateY(-6px)}}
+
+/* ── INPUT ── */
+.chat-input-wrap{background:#fff;border-top:1px solid #e2e8f0;padding:14px 16px;display:flex;gap:10px;align-items:flex-end;flex-shrink:0;border-radius:0 0 16px 16px}
+#chatInput{flex:1;padding:11px 16px;border:1.5px solid #e2e8f0;border-radius:24px;font-family:inherit;font-size:.9rem;outline:none;resize:none;max-height:120px;line-height:1.5;transition:.2s;background:#f8fafc}
+#chatInput:focus{border-color:#1565c0;background:#fff;box-shadow:0 0 0 3px rgba(21,101,192,.08)}
+.btn-send{width:44px;height:44px;border-radius:50%;background:linear-gradient(135deg,#0d3b6e,#1565c0);color:#fff;border:none;cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:1rem;transition:.2s;flex-shrink:0;box-shadow:0 3px 10px rgba(21,101,192,.3)}
+.btn-send:hover{transform:scale(1.08)}
+.btn-send:disabled{opacity:.5;cursor:not-allowed;transform:none}
+.btn-clear{padding:8px 14px;background:#f1f5f9;color:#475569;border:1.5px solid #e2e8f0;border-radius:20px;font-family:inherit;font-size:.78rem;font-weight:600;cursor:pointer;transition:.2s;display:flex;align-items:center;gap:5px}
+.btn-clear:hover{background:#ffebee;border-color:#ef9a9a;color:#c62828}
+
+/* ── WELCOME CARD ── */
+.welcome-card{background:linear-gradient(135deg,#e3f2fd,#f3e5f5);border:1px solid #90caf9;border-radius:14px;padding:18px 20px;margin-bottom:4px}
+.welcome-card h4{font-size:.95rem;font-weight:800;color:#0d3b6e;margin-bottom:8px}
+.welcome-card p{font-size:.85rem;color:#475569;line-height:1.6}
+.quick-btns{display:flex;flex-wrap:wrap;gap:7px;margin-top:12px}
+.quick-btn{padding:7px 14px;border-radius:50px;border:1.5px solid #90caf9;background:#fff;font-size:.8rem;font-weight:600;color:#1565c0;cursor:pointer;transition:.2s}
+.quick-btn:hover{background:#1565c0;color:#fff;border-color:#1565c0}
+
+/* ── DISCLAIMER ── */
+.disclaimer{font-size:.72rem;color:#94a3b8;text-align:center;padding:6px 16px;background:#f8fafc;border-top:1px solid #f1f5f9;flex-shrink:0}
+</style>
+</head>
+<body>
+<?php include 'sidebar.php'; ?>
+<div class="y-main">
+<?php include 'topbar.php'; ?>
+<main class="y-content" style="padding:16px;display:flex;flex-direction:column">
+
+<div class="chat-wrap">
+
+  <!-- Header -->
+  <div class="chat-header">
+    <div class="bot-avatar">🤖</div>
+    <div style="flex:1">
+      <div class="bot-name">LYDO Well-being Assistant</div>
+      <div class="bot-status"><span class="status-dot"></span> Always here for you</div>
+    </div>
+    <button class="btn-clear" onclick="clearChat()" title="Clear conversation">
+      <i class="fas fa-trash-alt"></i> Clear
+    </button>
+  </div>
+
+  <!-- Quick topic chips -->
+  <div class="chat-topics">
+    <span style="font-size:.72rem;font-weight:700;color:#94a3b8;align-self:center">Quick topics:</span>
+    <?php
+    $topics = [
+      ['😰 Stress','I am feeling very stressed and overwhelmed lately'],
+      ['😟 Anxiety','I have been feeling anxious and worried all the time'],
+      ['😔 Sadness','I have been feeling sad and empty lately'],
+      ['📚 School','I am struggling with my studies and school pressure'],
+      ['💼 Career','I feel lost about my future and career direction'],
+      ['💑 Relationships','I am having problems with my relationship'],
+      ['😴 Sleep','I cannot sleep well and always feel tired'],
+      ['💪 Confidence','I feel insecure and lack self-confidence'],
+      ['🔥 Motivation','I have no motivation and keep procrastinating'],
+      ['💰 Money','I am stressed about my financial situation'],
+    ];
+    foreach ($topics as [$label, $msg]):
+    ?>
+    <span class="topic-chip" onclick="sendQuick(<?= json_encode($msg) ?>)"><?= $label ?></span>
+    <?php endforeach; ?>
+  </div>
+
+  <!-- Messages -->
+  <div class="chat-messages" id="chatMessages">
+
+    <!-- Welcome message -->
+    <div class="msg-row">
+      <div class="msg-avatar bot">🤖</div>
+      <div>
+        <div class="msg-bubble bot">
+          <div class="welcome-card">
+            <h4>Hello, <?= htmlspecialchars($firstName) ?>! 👋 I'm your Well-being Assistant.</h4>
+            <p>I'm here to listen and give you <strong>practical, evidence-based advice</strong> on mental health, stress, school, career, relationships, and more. Everything you share here is private.</p>
+            <div class="quick-btns">
+              <span class="quick-btn" onclick="sendQuick('I am feeling stressed')">😰 I\'m stressed</span>
+              <span class="quick-btn" onclick="sendQuick('I feel sad and empty')">😔 I\'m feeling down</span>
+              <span class="quick-btn" onclick="sendQuick('I need career advice')">💼 Career help</span>
+              <span class="quick-btn" onclick="sendQuick('I have school problems')">📚 School issues</span>
+            </div>
+          </div>
+          <div style="font-size:.82rem;color:#475569;margin-top:8px">How are you feeling today? Tell me what's on your mind. 💬</div>
+        </div>
+        <div class="msg-time bot-time">Just now</div>
+      </div>
+    </div>
+
+    <!-- Load history -->
+    <?php foreach ($history as $h):
+      $isBot = $h['role'] === 'bot';
+      $initials = strtoupper(substr($user['first_name'] ?? 'U', 0, 1));
+      $time = date('g:i A', strtotime($h['created_at']));
+    ?>
+    <div class="msg-row <?= $isBot ? '' : 'user' ?>">
+      <div class="msg-avatar <?= $isBot ? 'bot' : 'user' ?>"><?= $isBot ? '🤖' : htmlspecialchars($initials) ?></div>
+      <div>
+        <div class="msg-bubble <?= $isBot ? 'bot' : 'user' ?>"><?= $isBot ? formatBotMessage($h['message']) : nl2br(htmlspecialchars($h['message'])) ?></div>
+        <div class="msg-time <?= $isBot ? 'bot-time' : '' ?>"><?= $time ?></div>
+      </div>
+    </div>
+    <?php endforeach; ?>
+
+    <!-- Typing indicator -->
+    <div class="typing-indicator" id="typingIndicator">
+      <div class="msg-avatar bot">🤖</div>
+      <div class="typing-dots"><span></span><span></span><span></span></div>
+    </div>
+
+  </div><!-- end chat-messages -->
+
+  <!-- Disclaimer -->
+  <div class="disclaimer">
+    <i class="fas fa-shield-alt"></i> This is a supportive tool, not a substitute for professional mental health care.
+    If you're in crisis, call <strong>Hopeline: 1553</strong> or <strong>NCMH: (02) 8989-8727</strong>
+  </div>
+
+  <!-- Input -->
+  <div class="chat-input-wrap">
+    <textarea id="chatInput" placeholder="Type how you're feeling or what's on your mind..." rows="1"
+      onkeydown="handleKey(event)" oninput="autoResize(this)"></textarea>
+    <button class="btn-send" id="sendBtn" onclick="sendMessage()" title="Send">
+      <i class="fas fa-paper-plane"></i>
+    </button>
+  </div>
+
+</div><!-- end chat-wrap -->
+
+</main>
+</div>
+
+<script>
+const chatMessages = document.getElementById('chatMessages');
+const chatInput    = document.getElementById('chatInput');
+const sendBtn      = document.getElementById('sendBtn');
+const typing       = document.getElementById('typingIndicator');
+const userInitial  = <?= json_encode(strtoupper(substr($user['first_name'] ?? 'U', 0, 1))) ?>;
+
+// Scroll to bottom
+function scrollBottom() {
+  chatMessages.scrollTop = chatMessages.scrollHeight;
+}
+scrollBottom();
+
+// Auto-resize textarea
+function autoResize(el) {
+  el.style.height = 'auto';
+  el.style.height = Math.min(el.scrollHeight, 120) + 'px';
+}
+
+// Enter to send (Shift+Enter for newline)
+function handleKey(e) {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    sendMessage();
+  }
+}
+
+// Quick topic buttons
+function sendQuick(msg) {
+  chatInput.value = msg;
+  sendMessage();
+}
+
+// Format time
+function timeNow() {
+  const d = new Date();
+  let h = d.getHours(), m = d.getMinutes();
+  const ampm = h >= 12 ? 'PM' : 'AM';
+  h = h % 12 || 12;
+  return h + ':' + String(m).padStart(2,'0') + ' ' + ampm;
+}
+
+// Render markdown-like formatting
+function formatMsg(text) {
+  return text
+    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+    .replace(/\*(.+?)\*/g, '<em>$1</em>')
+    .replace(/^---$/gm, '<hr>')
+    .replace(/\n/g, '<br>');
+}
+
+// Add message bubble to UI
+function addMessage(role, text) {
+  const row = document.createElement('div');
+  row.className = 'msg-row' + (role === 'user' ? ' user' : '');
+
+  const avatar = document.createElement('div');
+  avatar.className = 'msg-avatar ' + role;
+  avatar.textContent = role === 'bot' ? '🤖' : userInitial;
+
+  const bubble = document.createElement('div');
+  bubble.className = 'msg-bubble ' + role;
+  bubble.innerHTML = role === 'bot' ? formatMsg(text) : text.replace(/\n/g,'<br>').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+
+  const time = document.createElement('div');
+  time.className = 'msg-time' + (role === 'bot' ? ' bot-time' : '');
+  time.textContent = timeNow();
+
+  const wrap = document.createElement('div');
+  wrap.appendChild(bubble);
+  wrap.appendChild(time);
+
+  row.appendChild(avatar);
+  row.appendChild(wrap);
+
+  // Insert before typing indicator
+  chatMessages.insertBefore(row, typing);
+  scrollBottom();
+}
+
+// Send message
+async function sendMessage() {
+  const msg = chatInput.value.trim();
+  if (!msg || sendBtn.disabled) return;
+
+  // Add user message
+  addMessage('user', msg);
+  chatInput.value = '';
+  chatInput.style.height = 'auto';
+  sendBtn.disabled = true;
+
+  // Show typing
+  typing.classList.add('show');
+  scrollBottom();
+
+  try {
+    const fd = new FormData();
+    fd.append('ajax_chat', '1');
+    fd.append('message', msg);
+
+    const res  = await fetch(window.location.href, { method: 'POST', body: fd });
+    const data = await res.json();
+
+    // Simulate typing delay (feels more natural)
+    await new Promise(r => setTimeout(r, 800 + Math.random() * 600));
+
+    typing.classList.remove('show');
+    addMessage('bot', data.reply || 'Sorry, I could not process that. Please try again.');
+  } catch (err) {
+    typing.classList.remove('show');
+    addMessage('bot', '❌ Connection error. Please check your internet and try again.');
+  }
+
+  sendBtn.disabled = false;
+  chatInput.focus();
+}
+
+// Clear chat
+async function clearChat() {
+  if (!confirm('Clear your entire conversation history?')) return;
+  const fd = new FormData();
+  fd.append('clear_chat', '1');
+  await fetch(window.location.href, { method: 'POST', body: fd });
+
+  // Remove all messages except welcome
+  const rows = chatMessages.querySelectorAll('.msg-row:not(:first-child)');
+  rows.forEach(r => { if (r !== typing.parentElement && r !== typing) r.remove(); });
+  typing.classList.remove('show');
+}
+
+// Sidebar toggle
+const yHam=document.getElementById('yHamburger'),ySb=document.getElementById('ySidebar'),yOv=document.getElementById('yOverlay'),yCl=document.getElementById('ySidebarClose');
+if(yHam)yHam.addEventListener('click',()=>{ySb.classList.add('open');yOv.classList.add('open');});
+if(yCl)yCl.addEventListener('click',()=>{ySb.classList.remove('open');yOv.classList.remove('open');});
+if(yOv)yOv.addEventListener('click',()=>{ySb.classList.remove('open');yOv.classList.remove('open');});
+</script>
+</body>
+</html>
+<?php
+function formatBotMessage(string $text): string {
+    $text = htmlspecialchars($text);
+    $text = preg_replace('/\*\*(.+?)\*\*/s', '<strong>$1</strong>', $text);
+    $text = preg_replace('/\*(.+?)\*/s', '<em>$1</em>', $text);
+    $text = preg_replace('/^---$/m', '<hr>', $text);
+    $text = nl2br($text);
+    return $text;
+}
+?>

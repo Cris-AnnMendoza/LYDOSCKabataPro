@@ -1,0 +1,270 @@
+/* ============================================================
+   LYDO SYSTEM — GLOBAL RESPONSIVE PATCH
+   Included in all pages via shared includes.
+   Fixes inline-style grids and page-specific layouts.
+   ============================================================ */
+
+/* ── Viewport meta safety ── */
+* { box-sizing: border-box; }
+img, video, iframe { max-width: 100%; height: auto; }
+
+/* ── Utility: hide on small screens ── */
+@media (max-width: 600px) {
+  .hide-sm { display: none !important; }
+}
+@media (max-width: 900px) {
+  .hide-md { display: none !important; }
+}
+
+/* ══════════════════════════════════════════════════════════
+   LANDING PAGE (index.html / styles.css)
+   ══════════════════════════════════════════════════════════ */
+@media (max-width: 640px) {
+  .auth-cards-grid { grid-template-columns: 1fr !important; }
+  .auth-card { padding: 28px 20px !important; }
+  .hero-title { font-size: 1.9rem !important; }
+  .hero-subtitle { font-size: .95rem !important; }
+  .hero-stats { padding: 14px 16px !important; gap: 14px !important; }
+  .stat-num { font-size: 1.4rem !important; }
+  .section { padding: 56px 0 !important; }
+  .section-title { font-size: 1.6rem !important; }
+  .contact-form { padding: 24px 18px !important; }
+  .modal { height: 100vh !important; max-height: 100vh !important; border-radius: 0 !important; }
+  .modal-steps { padding: 10px 12px !important; }
+  .step-label { display: none !important; }
+  .classification-grid { grid-template-columns: repeat(2, 1fr) !important; }
+  .checkbox-group { grid-template-columns: 1fr !important; }
+  .form-row-3 { grid-template-columns: 1fr !important; }
+}
+
+/* ══════════════════════════════════════════════════════════
+   LOGIN PAGE (login.html / login.css)
+   ══════════════════════════════════════════════════════════ */
+@media (max-width: 768px) {
+  .login-wrapper { grid-template-columns: 1fr !important; }
+  .login-left { display: none !important; }
+  .login-right { min-height: 100vh; padding: 40px 20px !important; }
+  .back-link { top: 16px !important; left: 16px !important; }
+}
+
+/* ══════════════════════════════════════════════════════════
+   YOUTH PORTAL — All pages using youth.css
+   ══════════════════════════════════════════════════════════ */
+
+/* Dashboard stat cards */
+@media (max-width: 700px) {
+  /* 3-col stat grid → 1-col */
+  [style*="grid-template-columns:repeat(3,1fr)"],
+  [style*="grid-template-columns: repeat(3, 1fr)"] {
+    grid-template-columns: 1fr 1fr !important;
+  }
+}
+@media (max-width: 480px) {
+  [style*="grid-template-columns:repeat(3,1fr)"],
+  [style*="grid-template-columns: repeat(3, 1fr)"],
+  [style*="grid-template-columns:1fr 1fr"],
+  [style*="grid-template-columns: 1fr 1fr"] {
+    grid-template-columns: 1fr !important;
+  }
+  /* Quick links 2-col → 1-col */
+  [style*="grid-template-columns:1fr 1fr"] {
+    grid-template-columns: 1fr !important;
+  }
+}
+
+/* Profile tabs */
+@media (max-width: 600px) {
+  .tabs { width: 100% !important; flex-wrap: wrap !important; }
+  .tab-btn { flex: 1 1 auto !important; font-size: .78rem !important; padding: 7px 8px !important; text-align: center !important; }
+  .form-row-2, .form-row-3 { grid-template-columns: 1fr !important; }
+  .chk-grid { grid-template-columns: 1fr 1fr !important; }
+}
+
+/* Assistance page */
+@media (max-width: 700px) {
+  [style*="grid-template-columns:1fr 1.4fr"],
+  [style*="grid-template-columns: 1fr 1.4fr"],
+  [style*="grid-template-columns:1fr 1fr;gap:20px"] {
+    grid-template-columns: 1fr !important;
+  }
+}
+
+/* Dashboard 2-col layout */
+@media (max-width: 800px) {
+  [style*="grid-template-columns:1fr 1fr;gap:16px"],
+  [style*="grid-template-columns: 1fr 1fr; gap: 16px"] {
+    grid-template-columns: 1fr !important;
+  }
+  /* QR + announcements grid */
+  [style*="grid-template-columns:auto 1fr"] {
+    grid-template-columns: 1fr !important;
+  }
+}
+
+/* Resume builder */
+@media (max-width: 900px) {
+  .rb-wrap { grid-template-columns: 1fr !important; }
+  .rb-form-card { position: static !important; }
+  #resumePaper { padding: 24px 20px !important; }
+  .r-two-col { grid-template-columns: 1fr !important; }
+  .r-name { font-size: 16pt !important; }
+  .r-contact { gap: 8px !important; }
+}
+
+/* Well-being chatbot */
+@media (max-width: 600px) {
+  .chat-wrap { height: calc(100vh - 110px) !important; }
+  .chat-topics { gap: 4px !important; padding: 8px 10px !important; }
+  .topic-chip { font-size: .7rem !important; padding: 4px 9px !important; }
+  .msg-bubble { max-width: 88% !important; font-size: .84rem !important; }
+  #chatInput { font-size: .88rem !important; }
+}
+
+/* Events page */
+@media (max-width: 600px) {
+  .ev-tabs { width: 100% !important; }
+  .ev-tab { flex: 1 !important; justify-content: center !important; padding: 8px 6px !important; font-size: .75rem !important; }
+  .code-input { font-size: 1.4rem !important; letter-spacing: .2em !important; }
+  .merit-banner { padding: 14px 16px !important; gap: 12px !important; }
+  .merit-pts { font-size: 1.8rem !important; }
+}
+
+/* ══════════════════════════════════════════════════════════
+   ADMIN PANEL — All pages using admin.css
+   ══════════════════════════════════════════════════════════ */
+
+/* Admin sidebar toggle button */
+@media (max-width: 900px) {
+  .sidebar-toggle { display: flex !important; }
+  .sidebar { transform: translateX(-100%) !important; transition: transform .3s ease !important; }
+  .sidebar.open { transform: translateX(0) !important; }
+  .main-wrap { margin-left: 0 !important; }
+
+  /* Admin overlay */
+  .admin-overlay {
+    display: none; position: fixed; inset: 0; z-index: 199;
+    background: rgba(15,23,42,.5); backdrop-filter: blur(3px);
+  }
+  .admin-overlay.open { display: block; }
+}
+
+/* Admin stats grid */
+@media (max-width: 900px) {
+  .stats-grid { grid-template-columns: repeat(2, 1fr) !important; }
+  .dash-grid { grid-template-columns: 1fr !important; }
+}
+@media (max-width: 480px) {
+  .stats-grid { grid-template-columns: 1fr 1fr !important; }
+}
+@media (max-width: 360px) {
+  .stats-grid { grid-template-columns: 1fr !important; }
+}
+
+/* Admin tables — horizontal scroll on mobile */
+@media (max-width: 700px) {
+  .table-wrap { overflow-x: auto !important; -webkit-overflow-scrolling: touch !important; }
+  .tbl { min-width: 560px !important; }
+  .tbl th, .tbl td { padding: 8px 10px !important; font-size: .78rem !important; }
+  /* Hide less important columns */
+  .tbl th:nth-child(n+6), .tbl td:nth-child(n+6) { display: none !important; }
+}
+
+/* Admin attendance grid */
+@media (max-width: 700px) {
+  .att-row { grid-template-columns: 1fr !important; gap: 6px !important; }
+  .att-radio { gap: 5px !important; }
+  .att-radio label { font-size: .72rem !important; padding: 3px 6px !important; }
+}
+
+/* Admin QR page */
+@media (max-width: 700px) {
+  .qr-section { grid-template-columns: 1fr !important; }
+  .stat-row { grid-template-columns: repeat(3, 1fr) !important; }
+}
+@media (max-width: 480px) {
+  .stat-row { grid-template-columns: 1fr 1fr !important; }
+}
+
+/* Admin event scan page */
+@media (max-width: 700px) {
+  .scanner-wrap { grid-template-columns: 1fr !important; }
+}
+
+/* Admin merit leaderboard */
+@media (max-width: 700px) {
+  [style*="grid-template-columns:1fr 1fr;gap:16px"] {
+    grid-template-columns: 1fr !important;
+  }
+}
+
+/* Admin modal */
+@media (max-width: 600px) {
+  .modal-overlay { padding: 8px !important; }
+  .modal-box { max-width: 100% !important; margin: 0 !important; border-radius: 12px !important; }
+  .modal-head { padding: 12px 14px !important; }
+  .modal-body { padding: 14px !important; }
+  .modal-footer { flex-direction: column !important; }
+  .modal-footer button { width: 100% !important; justify-content: center !important; }
+}
+
+/* ══════════════════════════════════════════════════════════
+   FORGOT PASSWORD / RESET PASSWORD
+   ══════════════════════════════════════════════════════════ */
+@media (max-width: 480px) {
+  .card { border-radius: 0 !important; min-height: 100vh !important; }
+  .card-top { padding: 24px 20px !important; }
+  .card-body { padding: 20px 16px !important; }
+  .steps { gap: 0 !important; }
+  .step-label { font-size: .6rem !important; }
+}
+
+/* ══════════════════════════════════════════════════════════
+   ACCREDITATION / ASSISTANCE / VOLUNTEER pages
+   ══════════════════════════════════════════════════════════ */
+@media (max-width: 600px) {
+  .doc-upload-grid,
+  .doc-grid { grid-template-columns: 1fr !important; }
+  .workflow { padding: 0 !important; }
+}
+
+/* ══════════════════════════════════════════════════════════
+   GENERAL FIXES
+   ══════════════════════════════════════════════════════════ */
+
+/* Prevent horizontal overflow everywhere */
+body { overflow-x: hidden !important; }
+
+/* Touch-friendly tap targets */
+@media (max-width: 768px) {
+  button, a, input, select, textarea {
+    min-height: 40px;
+  }
+  button, a.btn-primary, a.btn-secondary, a.btn-back, a.btn-view-cert {
+    min-height: 40px;
+  }
+}
+
+/* Better font sizes on small screens */
+@media (max-width: 400px) {
+  body { font-size: 14px !important; }
+  .y-page-header h2 { font-size: 1.1rem !important; }
+  .y-topbar-title { font-size: .82rem !important; }
+}
+
+/* Scrollable horizontal tables */
+.table-responsive {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* Fix inline grid styles that don't collapse */
+@media (max-width: 600px) {
+  [style*="display:grid"] {
+    grid-template-columns: 1fr !important;
+  }
+  /* But keep 2-col for small items like badges */
+  .chk-grid,
+  .classification-grid {
+    grid-template-columns: 1fr 1fr !important;
+  }
+}
