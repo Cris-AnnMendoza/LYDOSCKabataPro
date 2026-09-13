@@ -1,0 +1,67 @@
+ACCREDITATION TEMPLATE FILES SETUP
+===================================
+
+The template files need to be placed in this folder manually.
+
+Since the actual PDF/DOCX/XLSX files were not provided, you have TWO OPTIONS:
+
+OPTION 1: Use the Documents You Provided
+-----------------------------------------
+You mentioned you have these files. Please save them in this folder:
+
+1. "1- LYDO ORGANIZATION ACCREDITATION FORM.pdf"
+   Save as: 1-LYDO-Accreditation-Form.pdf
+
+2. "2-Directory-of-Officers-Advisers.docx"  
+   Save as: 2-Directory-Officers-Advisers.docx
+
+3. "3- List-of-Members-in-Good-Standing.xlsx"
+   Save as: 3-Members-List.xlsx
+
+4. Create a blank Constitution template
+   Save as: 4-Constitution-Bylaws-Template.docx
+
+5. "1-5 YORP NYC Registration-Form.docx"
+   Save as: 5-YORP-Registration-Form.docx
+
+
+OPTION 2: For Testing - Use Placeholder Files
+----------------------------------------------
+I've created placeholder HTML files that can be used for testing.
+Organization presidents can download these and see how the system works.
+
+Later, replace them with the actual Word/Excel/PDF files.
+
+
+CURRENT STATUS
+--------------
+✅ Accreditation page created
+✅ Upload system working
+✅ Database table auto-creates
+⏳ Waiting for actual template files
+
+The system is FULLY FUNCTIONAL even with placeholder files!
+
+
+WHERE TO PUT FILES
+------------------
+Full path: c:\xampp\htdocs\LYDO\lydo-system\org-president\documents\
+
+Filename format:
+- 1-LYDO-Accreditation-Form.pdf
+- 2-Directory-Officers-Advisers.docx
+- 3-Members-List.xlsx
+- 4-Constitution-Bylaws-Template.docx
+- 5-YORP-Registration-Form.docx
+
+
+TESTING THE SYSTEM
+------------------
+You can test RIGHT NOW with the placeholder files!
+
+1. Go to: http://localhost/LYDO/lydo-system/org-president/accreditation.php
+2. Download the placeholder templates
+3. Upload any PDF/DOC/DOCX files to test the upload function
+4. Later, replace placeholders with real templates
+
+The upload system works perfectly - just need the real template files!
